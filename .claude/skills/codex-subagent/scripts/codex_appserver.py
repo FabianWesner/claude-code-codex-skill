@@ -105,7 +105,7 @@ def main():
     a = ap.parse_args()
 
     srv = AppServer(a.cwd)
-    init = srv.request("initialize", {"clientInfo": {"name": "aufneu-orch", "version": "0.1.0"}})
+    init = srv.request("initialize", {"clientInfo": {"name": "codex-subagent-appserver", "version": "0.1.0"}})
     srv.notify("initialized")
     th = srv.request("thread/start", {"cwd": a.cwd, "approvalPolicy": "never"})
     srv.thread_id = (th.get("thread") or {}).get("id")

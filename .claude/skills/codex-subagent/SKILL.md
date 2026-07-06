@@ -1,27 +1,26 @@
 ---
 name: codex-subagent
-description: Run headless Codex (GPT-5.5, xhigh reasoning) from Bash as an orchestration sub-agent — a second opinion, heavy analysis, or a bounded code task. For the lead session or an Opus agent.
+description: Run headless Codex (GPT-5.5, xhigh reasoning) from Bash as an orchestration sub-agent for second opinions, heavy analysis, or bounded code tasks.
 ---
 
 # Codex as an orchestration sub-agent
 
 Use headless Codex (`codex exec`) to offload heavy work or get an independent second opinion when
-Claude weekly limits are tight. Verified working: codex-cli 0.142.5, logged in via ChatGPT, model
+a separate reasoning or coding agent would help. Verified working: codex-cli 0.142.5, logged in via ChatGPT, model
 defaults to `gpt-5.5` + `model_reasoning_effort=xhigh`. The recipes still pass those flags explicitly.
 
 ## HARD SCOPE RULE
 
-Codex is a build-time developer tool ONLY: analysis, code, reviews, specific development work, second opinions launched by the
-lead or an Opus sub-agent. Any Codex-produced code lands as ordinary working-tree changes for the lead to review; the lead commits, agents do not.
+Codex is a build-time developer tool ONLY: analysis, code, reviews, specific development work, and second opinions launched by the
+supervising agent or operator. Any Codex-produced code lands as ordinary working-tree changes for review; sub-agents do not commit.
 
-The `codex@openai-codex` Claude Code plugin (`/codex:rescue` etc.) is USER-INVOKABLE ONLY and cannot
-be called by agents. Ignore it. Use the raw `codex exec` Bash recipes below.
+Do not route through host-specific user commands, plugins, or UI shortcuts. Use the raw `codex exec` Bash recipes below.
 
 ## Recipes (all verified; run via Bash)
 
 `-s`/`--sandbox`: `read-only` (default) | `workspace-write` (edits the tree) | `danger-full-access`.
 Final message goes to stdout and to `-o <file>`; streaming logs go to stderr; `--json` = JSONL events.
-Agent Bash threads reset cwd, so ALWAYS pass `-C <abs repo>` and an ABSOLUTE `-o` path (scratchpad, not /tmp).
+Some agent runtimes reset cwd, so ALWAYS pass `-C <abs repo>` and an ABSOLUTE `-o` path (scratchpad, not /tmp).
 There is no native timeout flag: run in the background and poll, or wrap with `gtimeout <secs>`.
 
 **ALWAYS append `</dev/null` to every `codex exec` launch.** ROOT CAUSE of ALL observed silent
@@ -51,7 +50,7 @@ cd <abs-repo> && codex exec resume --last -o <abs-out>.txt "<next step>"
 resumed session; workdir is the CURRENT cwd (not the original session's dir), so `cd` into the target
 repo first — verified: a resume from the wrong cwd wrote its file there instead of the intended dir.
 
-Launch pattern for an agent: prefer the harness background option so xhigh reasoning does not block,
+Launch pattern for an agent: prefer launching in the background so xhigh reasoning does not block,
 then read the `-o` file when done. Smoke-tested baseline: a read-only STATE.md summary ran in ~15s.
 
 ## Operations discipline (learned 2026-07-04, keep)
@@ -74,10 +73,10 @@ not metered API) lets an agent WATCH a run and CORRECT it mid-flight. Two bundle
 
 INTERACTIVE (recommended) — a background session with a file control plane that fits how an agent works:
 ```bash
-# 1. launch in the background (harness run_in_background); optional first --prompt
+# 1. launch in the background; optional first --prompt
 python3 .claude/skills/codex-subagent/scripts/codex_session.py \
   --dir <session-dir> --cwd <abs-repo> --model gpt-5.5 --effort xhigh [--prompt "<first turn>"]
-# 2. WATCH live: Monitor/tail <session-dir>/progress.log (turn start, each exec command, streamed answer, done)
+# 2. WATCH live: tail <session-dir>/progress.log (turn start, each exec command, streamed answer, done)
 # 3. DRIVE by appending one command per line to <session-dir>/control:
 echo 'steer: <correction>' >> <session-dir>/control   # inject into the ACTIVE turn
 echo 'turn: <new prompt>'  >> <session-dir>/control    # start another turn

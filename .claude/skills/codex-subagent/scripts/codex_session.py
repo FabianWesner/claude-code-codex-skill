@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Interactive Codex session daemon (app-server) — lets Claude Code drive Codex as a
-mid-flight-steerable sub-agent. Runs on the ChatGPT subscription (no API key). specs/98.
+"""Interactive Codex session daemon (app-server) — lets an orchestration agent drive Codex as a
+mid-flight-steerable sub-agent. Runs on the ChatGPT subscription (no API key).
 
 Fire-and-wait `codex exec` can't be corrected once running. This daemon holds ONE
 app-server thread and exposes a file-based control plane that fits how an agent works:
@@ -142,7 +142,7 @@ class Session:
                 self.log(f"\n[interrupt failed: {e}]")
 
     def run(self):
-        self.conn.request("initialize", {"clientInfo": {"name": "aufneu-session", "version": "0.1.0"}})
+        self.conn.request("initialize", {"clientInfo": {"name": "codex-subagent-session", "version": "0.1.0"}})
         self.conn.notify("initialized")
         th = self.conn.request("thread/start", {"cwd": self.a.cwd, "approvalPolicy": "never"})
         self.thread = (th.get("thread") or {}).get("id")
