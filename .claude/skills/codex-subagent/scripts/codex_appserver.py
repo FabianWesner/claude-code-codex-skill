@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Minimal stdio JSON-RPC client for `codex app-server` (GPT-5.5, ChatGPT-sub auth).
+"""Minimal stdio JSON-RPC client for `codex app-server` (GPT-5.6 Sol, ChatGPT-sub auth).
 
 Orchestration-side second-opinion tool with MID-FLIGHT STEERING (turn/steer) that a
 one-shot `codex exec` cannot do. Uses the same ~/.codex/auth.json as the CLI (ChatGPT
 subscription, no API key).
 
 Usage:
-  codex_appserver.py "<prompt>" [--cwd DIR] [--model gpt-5.5] [--effort xhigh]
+  codex_appserver.py "<prompt>" [--cwd DIR] [--model gpt-5.6-sol]
+                     [--effort low|medium|xhigh|ultra]
                      [--steer "<text>" --steer-after SECS] [-o OUTFILE]
 Prints the final agent message to stdout (and OUTFILE). Streaming + logs go to stderr.
 """
@@ -96,8 +97,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("prompt")
     ap.add_argument("--cwd", default=os.getcwd())
-    ap.add_argument("--model", default="gpt-5.5")
-    ap.add_argument("--effort", default="xhigh")
+    ap.add_argument("--model", default="gpt-5.6-sol")
+    ap.add_argument("--effort", default="xhigh", choices=["low", "medium", "xhigh", "ultra"])
     ap.add_argument("--steer")
     ap.add_argument("--steer-after", type=float, default=2.0)
     ap.add_argument("-o", "--output")

@@ -16,7 +16,8 @@ Control commands (one per line, appended to <dir>/control):
   quit             shut down
 
 Usage:
-  codex_session.py --dir <session-dir> --cwd <repo> [--model gpt-5.5] [--effort xhigh]
+  codex_session.py --dir <session-dir> --cwd <repo> [--model gpt-5.6-sol]
+                   [--effort low|medium|xhigh|ultra]
                    [--sandbox read-only|workspace-write] [--prompt "<first turn>"]
 """
 import argparse, json, os, subprocess, sys, threading, time
@@ -185,8 +186,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
     ap.add_argument("--cwd", default=os.getcwd())
-    ap.add_argument("--model", default="gpt-5.5")
-    ap.add_argument("--effort", default="xhigh")
+    ap.add_argument("--model", default="gpt-5.6-sol")
+    ap.add_argument("--effort", default="xhigh", choices=["low", "medium", "xhigh", "ultra"])
     ap.add_argument("--sandbox", default="read-only", choices=["read-only", "workspace-write"])
     ap.add_argument("--prompt")
     Session(ap.parse_args()).run()

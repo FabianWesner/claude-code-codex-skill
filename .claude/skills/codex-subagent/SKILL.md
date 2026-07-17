@@ -1,13 +1,15 @@
 ---
 name: codex-subagent
-description: Run headless Codex (GPT-5.5, xhigh reasoning) from Bash as an orchestration sub-agent for second opinions, heavy analysis, or bounded code tasks.
+description: Run headless Codex (GPT-5.6 Sol, selectable reasoning) from Bash as an orchestration sub-agent for second opinions, heavy analysis, or bounded code tasks.
 ---
 
 # Codex as an orchestration sub-agent
 
 Use headless Codex (`codex exec`) to offload heavy work or get an independent second opinion when
-a separate reasoning or coding agent would help. Verified working: codex-cli 0.142.5, logged in via ChatGPT, model
-defaults to `gpt-5.5` + `model_reasoning_effort=xhigh`. The recipes still pass those flags explicitly.
+a separate reasoning or coding agent would help. Runs on the ChatGPT login (no metered API key).
+Model: `gpt-5.6-sol`. Reasoning effort is chosen per task by the calling agent — pick one of `low`,
+`medium`, `xhigh`, `ultra` and scale it to the job (`low` for quick lookups, `xhigh`/`ultra` for
+heavy analysis or hard code tasks). The recipes pass `-m` and `model_reasoning_effort` explicitly.
 
 ## HARD SCOPE RULE
 
@@ -31,13 +33,13 @@ seconds (SMOKE-OK verified 2026-07-04).
 
 (a) One-shot read-only second opinion / analysis:
 ```bash
-codex exec -C <abs-repo> -m gpt-5.5 -c model_reasoning_effort="xhigh" -s read-only \
+codex exec -C <abs-repo> -m gpt-5.6-sol -c model_reasoning_effort="<low|medium|xhigh|ultra>" -s read-only \
   -o <abs-out>.txt "<question>"
 ```
 
 (b) Bounded code-writing task (edits the working tree):
 ```bash
-codex exec -C <abs-repo> -m gpt-5.5 -c model_reasoning_effort="xhigh" -s workspace-write \
+codex exec -C <abs-repo> -m gpt-5.6-sol -c model_reasoning_effort="<low|medium|xhigh|ultra>" -s workspace-write \
   -o <abs-out>.txt "<imperative task>"
 ```
 
@@ -75,7 +77,7 @@ INTERACTIVE (recommended) — a background session with a file control plane tha
 ```bash
 # 1. launch in the background; optional first --prompt
 python3 .claude/skills/codex-subagent/scripts/codex_session.py \
-  --dir <session-dir> --cwd <abs-repo> --model gpt-5.5 --effort xhigh [--prompt "<first turn>"]
+  --dir <session-dir> --cwd <abs-repo> --model gpt-5.6-sol --effort <low|medium|xhigh|ultra> [--prompt "<first turn>"]
 # 2. WATCH live: tail <session-dir>/progress.log (turn start, each exec command, streamed answer, done)
 # 3. DRIVE by appending one command per line to <session-dir>/control:
 echo 'steer: <correction>' >> <session-dir>/control   # inject into the ACTIVE turn
@@ -91,7 +93,7 @@ Codex driven as a sub-agent and corrected while running.
 ONE-SHOT (simpler, no live control) — single turn, optional pre-timed steer:
 ```bash
 python3 .claude/skills/codex-subagent/scripts/codex_appserver.py "<prompt>" \
-  --cwd <abs-repo> --model gpt-5.5 --effort xhigh -o <abs-out>.txt [--steer "<text>" --steer-after <secs>]
+  --cwd <abs-repo> --model gpt-5.6-sol --effort <low|medium|xhigh|ultra> -o <abs-out>.txt [--steer "<text>" --steer-after <secs>]
 ```
 Both default to read-only + approvalPolicy=never; the session takes `--sandbox workspace-write` to let
 Codex edit the tree. Prefer plain `codex exec` for fire-and-forget; use these to see and steer a run.
