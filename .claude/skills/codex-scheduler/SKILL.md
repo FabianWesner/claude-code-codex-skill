@@ -121,7 +121,15 @@ row for that slug — a slug can be reused once its earlier job is terminal.
   rate (2.5x standard on GPT-5.6/5.5, 2x on GPT-5.4). It's a speed/cost tradeoff, independent of
   `effort` — use it when wall-clock time matters more than credit spend for that specific job.
 - **sandbox**: `read-only` | `workspace-write` (default) | `danger-full-access`, same semantics as
-  `codex exec -s`.
+  `codex exec -s`. **Which one do you need?** `workspace-write` blocks network access, TCP/Unix
+  sockets, and writes to `.git` — it's for straightforward file edits only. If the job stages
+  files (`git add`), drives a browser or emulator, runs anything socket-based (a local server, a
+  test harness that binds a port), or fetches something over the network, use
+  `--sandbox danger-full-access` instead. A `workspace-write` job that silently hits one of these
+  restrictions usually doesn't error cleanly — it just produces a wrong/empty result with no
+  obvious cause, so get the sandbox right up front rather than debugging it after the fact. The
+  submit confirmation and `list`/`show` always echo the sandbox actually used, specifically so a
+  wrong choice is visible immediately instead of discovered hours later.
 - **No auto-retry**: a failed/hung job is marked `failed` and reported as-is — the scheduler never
   silently resubmits it. Decide whether to `submit` it again yourself after seeing why it failed
   (`show <slug>`).
@@ -144,6 +152,17 @@ showing a live-updating job table; click a row to expand it and live-tail that j
 `ui` any time — it detects and reuses an already-running instance on that port instead of
 double-starting.
 
+The table's "Working On" column (running jobs only) is a one-line, plain-language summary of what
+a job is doing right now — e.g. "Currently testing the Android mobile app" — regenerated about
+once a minute per running job by a separate, cheap `codex exec -m gpt-5.6-luna -c
+model_reasoning_effort=low` call fed the job's own recent (filtered) output. It's a nice-to-have,
+not something to depend on for anything besides a glance at the table.
+
+**The dashboard is a static page that polls for data, not one that hot-reloads its own code** — if
+this skill's `static/index.html` changes (e.g. after an update to this skill), your browser tab
+needs a manual reload to pick up the new JavaScript; the live-updating table/log you already have
+open won't do that on its own.
+
 ## Notes
 
 - One global daemon and DB serve every workspace — job `workspace` is just each job's own `cwd`
@@ -153,3 +172,11 @@ double-starting.
 - Multiple Claude sessions (including Task-tool sub-agents, which inherit the same filesystem and
   Python) can submit/list/wait concurrently — the daemon is a singleton (flock-guarded) and all
   writes go through short SQLite transactions in WAL mode.
+- **Restarting the daemon kills every currently-running job** (recovered as `failed`, per the
+  no-auto-retry policy — see above). The daemon only restarts when it crashes or is explicitly
+  stopped/updated, so this is rare in normal use, but keep it in mind before manually restarting it
+  (`daemon stop` + next command auto-starts it, or editing this skill's own scripts and reloading)
+  while something important is running.
+- The daemon checks once per calendar day (on whichever tick first notices the date changed) and
+  runs `npm install -g @openai/codex` before launching any new jobs that day, so Codex itself stays
+  current — this only gates new job launches, not jobs already running.

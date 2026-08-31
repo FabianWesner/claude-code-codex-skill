@@ -9,8 +9,11 @@ steer/interrupt/quit commands. See the codex-scheduler SKILL.md for the full des
 Singleton-enforced via an flock on daemon.lock so a race between two `ensure_daemon()` callers
 never produces two daemons. Not meant to be run by hand — scheduler_cli.py starts it detached.
 """
+import calendar
+import datetime
 import fcntl
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -19,6 +22,9 @@ import db
 import appserver_client
 
 TICK_SECONDS = 2.0
+CODEX_UPDATE_MARKER = os.path.join(db.STATE_DIR, "last_codex_update_date")
+SUMMARY_INTERVAL_SECONDS = 60
+SUMMARY_TAIL_LINES = 60
 
 
 class State:
@@ -179,13 +185,166 @@ def check_hangs(conn, state):
                 threading.Thread(target=js2.quit, daemon=True).start()
 
 
+# ---------------------------------------------------------------- daily Codex CLI auto-update
+
+_update_state = {"done_date": None, "in_progress": False}
+
+
+def _run_codex_update():
+    today = datetime.date.today().isoformat()
+    log(f"updating codex CLI (npm install -g @openai/codex) -- first run today ({today})")
+    try:
+        result = subprocess.run(
+            ["npm", "install", "-g", "@openai/codex"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=180, text=True,
+        )
+        tail = "\n".join((result.stdout or "").splitlines()[-5:])
+        log(f"codex update finished (exit={result.returncode}): {tail}")
+    except Exception as e:  # noqa - a failed/slow update must never take the daemon down
+        log(f"codex update failed: {e}")
+    _update_state["done_date"] = today
+    _update_state["in_progress"] = False
+    try:
+        with open(CODEX_UPDATE_MARKER, "w") as f:
+            f.write(today)
+    except OSError:
+        pass
+
+
+def ensure_codex_updated_today():
+    """Gates new job launches (not already-running jobs) until the first update attempt of the
+    day completes. Runs in a background thread so it never blocks reap/hang-check/steer polling
+    for jobs already in flight -- only launch_ready_jobs waits on it."""
+    today = datetime.date.today().isoformat()
+    if _update_state["done_date"] is None:
+        try:
+            with open(CODEX_UPDATE_MARKER) as f:
+                _update_state["done_date"] = f.read().strip()
+        except OSError:
+            _update_state["done_date"] = None
+    if _update_state["done_date"] == today or _update_state["in_progress"]:
+        return
+    _update_state["in_progress"] = True
+    threading.Thread(target=_run_codex_update, daemon=True).start()
+
+
+def codex_update_due_today():
+    return _update_state["done_date"] != datetime.date.today().isoformat()
+
+
+# ---------------------------------------------------------------- "working on" summaries
+
+_SHOWN_ITEM_TYPES = {"agentMessage", "commandExecution"}
+_summarizing = set()  # job ids with a summary call currently in flight
+
+
+def _filter_log_for_summary(text):
+    """Mirrors static/index.html's filterLog() in Python: keep only agentMessage/commandExecution
+    blocks (plus non-item marker lines) so the cheap summarizer sees the same signal a human
+    reading the filtered dashboard view would."""
+    current = None
+    out = []
+    for line in text.split("\n"):
+        if line.startswith("[item "):
+            end = line.find("]")
+            current = line[6:end] if end > 6 else None
+            if current in _SHOWN_ITEM_TYPES:
+                out.append(line)
+            continue
+        if line.startswith("["):
+            current = None
+            out.append(line)
+            continue
+        if current is None or current in _SHOWN_ITEM_TYPES:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _parse_iso_epoch(s):
+    if not s:
+        return 0
+    s = s.rstrip("Z").split(".")[0]
+    try:
+        return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return 0
+
+
+def _run_summary(job_id, workspace, log_text):
+    try:
+        tail = "\n".join(_filter_log_for_summary(log_text).splitlines()[-SUMMARY_TAIL_LINES:]).strip()
+        if tail:
+            prompt = (
+                "You are looking at a recent excerpt of Codex agent activity (tool calls and "
+                "messages) from an in-progress coding task. Write ONE short, user-friendly "
+                "sentence (under 12 words), present tense, describing what it is currently doing "
+                '-- e.g. "Currently testing the Android mobile app" or "Fixing a failing test in '
+                'the payment module". No preamble, no quotes, just the sentence.\n\n'
+                f"--- recent activity ---\n{tail}"
+            )
+            out_dir = os.path.join(db.STATE_DIR, "summaries")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{job_id}.txt")
+            subprocess.run(
+                ["codex", "exec", "-C", workspace, "-m", "gpt-5.6-luna",
+                 "-c", "model_reasoning_effort=low", "-s", "read-only", "-o", out_path, prompt],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=45,
+            )
+            summary = ""
+            if os.path.exists(out_path):
+                with open(out_path) as f:
+                    summary = (f.read().strip().splitlines() or [""])[0][:140]
+            if summary:
+                conn = db.connect()
+                try:
+                    conn.execute(
+                        "UPDATE jobs SET working_on=?, working_on_updated_at=? WHERE id=? AND status='running'",
+                        (summary, db.now_iso(), job_id),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+    except Exception as e:  # noqa - a summary is a nice-to-have, never worth crashing the daemon
+        log(f"summary failed for job #{job_id}: {e}")
+    finally:
+        _summarizing.discard(job_id)
+
+
+def maybe_summarize(conn, state):
+    now = time.time()
+    for job_id, js in state.items():
+        if job_id in _summarizing:
+            continue
+        row = conn.execute(
+            "SELECT working_on_updated_at, workspace FROM jobs WHERE id=? AND status='running'", (job_id,)
+        ).fetchone()
+        if not row:
+            continue
+        if row["working_on_updated_at"] and now - _parse_iso_epoch(row["working_on_updated_at"]) < SUMMARY_INTERVAL_SECONDS:
+            continue
+        try:
+            with open(os.path.join(js.dir, "progress.log")) as f:
+                log_text = f.read()
+        except OSError:
+            continue
+        if not log_text.strip():
+            continue
+        _summarizing.add(job_id)
+        threading.Thread(target=_run_summary, args=(job_id, row["workspace"], log_text), daemon=True).start()
+
+
 def tick(state, on_done):
     conn = db.connect()
     try:
         reap_dead_processes(conn, state)
         cascade_failed_deps(conn)
-        launch_ready_jobs(conn, state, on_done)
+        ensure_codex_updated_today()
+        if not codex_update_due_today():
+            launch_ready_jobs(conn, state, on_done)
         check_hangs(conn, state)
+        maybe_summarize(conn, state)
     finally:
         conn.close()
     for _job_id, js in state.items():

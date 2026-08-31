@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   result TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   started_at TEXT,
-  finished_at TEXT
+  finished_at TEXT,
+  working_on TEXT,
+  working_on_updated_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_slug ON jobs(slug) WHERE status IN ('queued','running');
 CREATE INDEX IF NOT EXISTS jobs_session ON jobs(claude_session_id);
@@ -80,6 +82,22 @@ def ensure_state_dirs():
     os.makedirs(JOBS_DIR, exist_ok=True)
 
 
+# Columns added after the initial release -- CREATE TABLE IF NOT EXISTS alone won't add these to
+# a DB that already exists on disk, so migrate() adds any that are missing.
+_ADDED_COLUMNS = [
+    ("jobs", "working_on", "TEXT"),
+    ("jobs", "working_on_updated_at", "TEXT"),
+]
+
+
+def _migrate(conn):
+    for table, col, coltype in _ADDED_COLUMNS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+    conn.commit()
+
+
 def connect(timeout=30.0):
     ensure_state_dirs()
     conn = sqlite3.connect(DB_PATH, timeout=timeout)
@@ -88,6 +106,7 @@ def connect(timeout=30.0):
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
     conn.commit()
+    _migrate(conn)
     return conn
 
 

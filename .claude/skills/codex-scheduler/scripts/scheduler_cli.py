@@ -149,7 +149,7 @@ def cmd_submit(args):
             raise
     finally:
         conn.close()
-    print(f"submitted job #{job_id} ({spec['slug']})")
+    print(f"submitted job #{job_id} ({spec['slug']}) [sandbox={spec['sandbox']}]")
 
 
 def cmd_submit_batch(args):
@@ -169,6 +169,7 @@ def cmd_submit_batch(args):
                 spec["prompt"] = pff.read()
         spec["workspace"] = os.path.abspath(spec["workspace"])
         spec.setdefault("priority", 0)
+        spec.setdefault("sandbox", "workspace-write")
         validate_job_spec(spec)
     slugs = [s["slug"] for s in specs]
     if len(slugs) != len(set(slugs)):
@@ -196,7 +197,7 @@ def cmd_submit_batch(args):
     finally:
         conn.close()
     for spec in specs:
-        print(f"submitted job #{batch_map[spec['slug']]} ({spec['slug']})")
+        print(f"submitted job #{batch_map[spec['slug']]} ({spec['slug']}) [sandbox={spec['sandbox']}]")
 
 
 # ---------------------------------------------------------------- list / show
@@ -211,16 +212,18 @@ def cmd_list(args):
         if not jobs:
             print("(no jobs)")
             return
-        widths = {"id": 4, "slug": 20, "status": 9, "effort": 6, "session": 12, "workspace": 30}
+        widths = {"id": 4, "slug": 20, "status": 9, "effort": 6, "sandbox": 18, "session": 12, "workspace": 30}
         header = f"{'ID':<{widths['id']}} {'SLUG':<{widths['slug']}} {'STATUS':<{widths['status']}} " \
-                 f"{'EFFORT':<{widths['effort']}} {'SESSION':<{widths['session']}} WORKSPACE"
+                 f"{'EFFORT':<{widths['effort']}} {'SANDBOX':<{widths['sandbox']}} " \
+                 f"{'SESSION':<{widths['session']}} WORKSPACE"
         print(header)
         for j in jobs:
             deps = db.get_deps(conn, j["id"])
             dep_str = "" if not deps else f" deps=[{','.join(d['slug'] for d in deps)}]"
             print(
                 f"{j['id']:<{widths['id']}} {j['slug']:<{widths['slug']}} {j['status']:<{widths['status']}} "
-                f"{j['effort']:<{widths['effort']}} {j['claude_session_id'][:12]:<{widths['session']}} "
+                f"{j['effort']:<{widths['effort']}} {j['sandbox']:<{widths['sandbox']}} "
+                f"{j['claude_session_id'][:12]:<{widths['session']}} "
                 f"{j['workspace']}{dep_str}"
             )
     finally:
