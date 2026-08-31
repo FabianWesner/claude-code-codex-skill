@@ -43,11 +43,15 @@ pass it consistently on every submit/wait for that job so jobs are attributed co
 
 For a DAG of jobs, submit them all at once as JSON and reference dependencies by slug:
 
+Each job spec takes either an inline `"prompt"` or a `"prompt_file"` (path to a file with the
+full brief — relative paths resolve against the directory containing `--file`, handy for keeping
+long briefs out of the JSON):
+
 ```bash
 cat > /tmp/jobs.json <<'EOF'
 [
   {"slug": "gen-a", "prompt": "...", "workspace": "/abs/repo", "effort": "xhigh"},
-  {"slug": "gen-b", "prompt": "...", "workspace": "/abs/repo", "effort": "xhigh"},
+  {"slug": "gen-b", "prompt_file": "gen-b-brief.md", "workspace": "/abs/repo", "effort": "xhigh"},
   {"slug": "merge", "prompt": "...", "workspace": "/abs/repo", "deps": ["gen-a", "gen-b"]}
 ]
 EOF

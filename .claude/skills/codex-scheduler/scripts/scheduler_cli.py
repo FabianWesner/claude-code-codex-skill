@@ -157,7 +157,16 @@ def cmd_submit_batch(args):
         specs = json.load(f)
     if not isinstance(specs, list) or not specs:
         err("--file must contain a non-empty JSON array of job specs")
+    base_dir = os.path.dirname(os.path.abspath(args.file))
     for spec in specs:
+        if not spec.get("prompt") and spec.get("prompt_file"):
+            pf = spec["prompt_file"]
+            if not os.path.isabs(pf):
+                pf = os.path.join(base_dir, pf)
+            if not os.path.exists(pf):
+                err(f"job '{spec.get('slug')}': prompt_file '{pf}' not found")
+            with open(pf) as pff:
+                spec["prompt"] = pff.read()
         spec["workspace"] = os.path.abspath(spec["workspace"])
         spec.setdefault("priority", 0)
         validate_job_spec(spec)
