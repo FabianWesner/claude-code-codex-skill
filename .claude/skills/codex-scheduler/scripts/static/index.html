@@ -23,16 +23,25 @@
   .deps { color: #8b949e; font-size: 11px; }
   .detail { display: none; background: #0d1117; }
   .detail.open { display: table-row; }
-  pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 340px;
-        overflow-y: auto; background: #010409; padding: 10px; border-radius: 6px; margin: 8px 0 0; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; height: 340px;
+        overflow-y: auto; background: #010409; padding: 10px; border-radius: 6px; margin: 6px 0 0;
+        box-sizing: border-box; }
   .meta { font-size: 12px; color: #8b949e; margin-top: 6px; }
+  .updated { color: #8b949e; white-space: nowrap; }
+  .detail-grid { display: flex; gap: 12px; align-items: flex-start; }
+  .detail-box { flex: 1; min-width: 0; }
+  .detail-box h4 { margin: 10px 0 0; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+                   color: #8b949e; font-weight: 600; }
+  .steer-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+  .steer-list li { margin-bottom: 4px; }
+  .steer-list .none { list-style: none; margin-left: -18px; color: #8b949e; }
 </style>
 </head>
 <body>
 <h1>codex-scheduler</h1>
 <table>
   <thead>
-    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Model</th><th>Effort</th><th>Fast</th><th>Session</th><th>Workspace</th></tr>
+    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Updated</th><th>Model</th><th>Effort</th><th>Fast</th><th>Session</th><th>Workspace</th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -41,8 +50,24 @@
 const rowsEl = document.getElementById('rows');
 const openSlugs = new Set();
 const logOffsets = {};
+const logText = {};
+const LOG_TAIL_LINES = 100;
 
 function esc(s) { return (s ?? '').toString().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function timeAgo(iso) {
+  if (!iso) return '-';
+  const then = new Date(iso.endsWith('Z') ? iso : iso + 'Z').getTime();
+  if (isNaN(then)) return iso;
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 5) return 'just now';
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
 
 async function refresh() {
   const jobs = await fetch('/api/jobs').then(r => r.json());
@@ -55,6 +80,7 @@ async function refresh() {
       <td>${j.id}</td>
       <td class="slug">${esc(j.slug)}${deps ? `<div class="deps">deps: ${esc(deps)}</div>` : ''}</td>
       <td><span class="badge ${j.status}">${j.status}</span></td>
+      <td class="updated" title="${esc(j.updated_at)}">${esc(timeAgo(j.updated_at))}</td>
       <td>${esc(j.model)}</td>
       <td>${esc(j.effort)}</td>
       <td>${j.fast_mode ? 'yes' : ''}</td>
@@ -66,21 +92,48 @@ async function refresh() {
     const detail = document.createElement('tr');
     detail.className = 'detail' + (openSlugs.has(j.slug) ? ' open' : '');
     detail.id = 'detail-' + j.slug;
-    detail.innerHTML = `<td colspan="8">
+    const steers = j.steers || [];
+    const steerHtml = steers.length
+      ? `<ol class="steer-list">${steers.map(s => `<li>${esc(s)}</li>`).join('')}</ol>`
+      : `<div class="steer-list"><span class="none">(none)</span></div>`;
+    detail.innerHTML = `<td colspan="9">
       <div class="meta">created ${esc(j.created_at)} · started ${esc(j.started_at || '-')} · finished ${esc(j.finished_at || '-')}</div>
       ${j.error ? `<div class="meta" style="color:#f85149">error: ${esc(j.error)}</div>` : ''}
-      <pre id="log-${j.slug}"></pre>
+      <div class="detail-grid">
+        <div class="detail-box">
+          <h4>Prompt</h4>
+          <pre>${esc(j.prompt)}</pre>
+          <h4>Steering</h4>
+          ${steerHtml}
+        </div>
+        <div class="detail-box">
+          <h4>Output (live, last ${LOG_TAIL_LINES} lines)</h4>
+          <pre id="log-${j.slug}"></pre>
+        </div>
+      </div>
     </td>`;
     rowsEl.appendChild(detail);
-    if (openSlugs.has(j.slug)) pollLog(j.slug);
+    if (openSlugs.has(j.slug)) {
+      const pre = document.getElementById('log-' + j.slug);
+      if (pre && logText[j.slug]) pre.textContent = tailLines(logText[j.slug]);
+      pollLog(j.slug);
+    }
   }
+}
+
+function tailLines(text) {
+  return text.split('\n').slice(-LOG_TAIL_LINES).join('\n');
 }
 
 function toggle(slug) {
   const el = document.getElementById('detail-' + slug);
   if (!el) return;
   if (openSlugs.has(slug)) { openSlugs.delete(slug); el.classList.remove('open'); }
-  else { openSlugs.add(slug); el.classList.add('open'); logOffsets[slug] = 0; pollLog(slug); }
+  else {
+    openSlugs.add(slug); el.classList.add('open');
+    logOffsets[slug] = 0; logText[slug] = '';
+    pollLog(slug);
+  }
 }
 
 async function pollLog(slug) {
@@ -89,8 +142,11 @@ async function pollLog(slug) {
   try {
     const r = await fetch(`/api/jobs/${encodeURIComponent(slug)}/log?offset=${offset}`).then(r => r.json());
     logOffsets[slug] = r.offset;
-    const pre = document.getElementById('log-' + slug);
-    if (pre && r.text) { pre.textContent += r.text; pre.scrollTop = pre.scrollHeight; }
+    if (r.text) {
+      logText[slug] = (logText[slug] || '') + r.text;
+      const pre = document.getElementById('log-' + slug);
+      if (pre) { pre.textContent = tailLines(logText[slug]); pre.scrollTop = pre.scrollHeight; }
+    }
   } catch (e) {}
 }
 

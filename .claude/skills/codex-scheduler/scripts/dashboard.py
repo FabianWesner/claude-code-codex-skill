@@ -8,17 +8,51 @@ import argparse
 import json
 import os
 import socketserver
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
 import db
 
+
+def compute_updated_at(job):
+    """Best signal for 'last activity': while running, the job's own progress.log mtime (ticks on
+    every streamed delta); otherwise the most recent lifecycle timestamp we have."""
+    if job["status"] == "running" and job.get("session_dir"):
+        log_path = os.path.join(job["session_dir"], "progress.log")
+        try:
+            mtime = os.path.getmtime(log_path)
+        except OSError:
+            mtime = None
+        if mtime:
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
+    return job.get("finished_at") or job.get("started_at") or job.get("created_at")
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+def get_steers(job):
+    """All steer: commands ever sent to this job, in order, full text (from the control file --
+    the definitive record of what was appended, independent of accept/reject)."""
+    if not job.get("session_dir"):
+        return []
+    path = os.path.join(job["session_dir"], "control")
+    if not os.path.exists(path):
+        return []
+    steers = []
+    with open(path, errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line.lower().startswith("steer:"):
+                steers.append(line[6:].strip())
+    return steers
 
 
 def job_to_json(conn, job):
     job = dict(job)
     job["deps"] = db.get_deps(conn, job["id"])
+    job["steers"] = get_steers(job)
+    job["updated_at"] = compute_updated_at(job)
     return job
 
 
