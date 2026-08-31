@@ -39,7 +39,20 @@
 </style>
 </head>
 <body>
-<h1>codex-scheduler</h1>
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+  <h1 style="margin:0;">codex-scheduler</h1>
+  <label style="font-size:12px;color:#8b949e;">
+    Show finished jobs from:
+    <select id="timeWindow" style="margin-left:6px;background:#161b22;color:#d8dee4;border:1px solid #30363d;
+                                    border-radius:6px;padding:3px 6px;font-size:12px;">
+      <option value="15">last 15 min</option>
+      <option value="60" selected>last 60 min</option>
+      <option value="480">last 8 hours</option>
+      <option value="1440">last 24 hours</option>
+      <option value="0">all</option>
+    </select>
+  </label>
+</div>
 <table>
   <thead>
     <tr><th>ID</th><th>Slug</th><th>Status</th><th>Updated</th><th>Model</th><th>Effort</th><th>Fast</th><th>Session</th><th>Workspace</th></tr>
@@ -112,8 +125,28 @@ function isNearBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 24;
 }
 
+const TERMINAL_STATUSES = new Set(['done', 'failed', 'stopped']);
+const timeWindowEl = document.getElementById('timeWindow');
+try {
+  const saved = localStorage.getItem('codex-scheduler-time-window');
+  if (saved) timeWindowEl.value = saved;
+} catch (e) {}
+timeWindowEl.onchange = () => {
+  try { localStorage.setItem('codex-scheduler-time-window', timeWindowEl.value); } catch (e) {}
+  refresh();
+};
+
+function withinTimeWindow(j) {
+  const minutes = parseInt(timeWindowEl.value, 10);
+  if (!minutes || !TERMINAL_STATUSES.has(j.status)) return true; // 0 = "all"; non-terminal always shown
+  const then = new Date((j.updated_at || '').endsWith('Z') ? j.updated_at : j.updated_at + 'Z').getTime();
+  if (isNaN(then)) return true;
+  return (Date.now() - then) / 60000 <= minutes;
+}
+
 async function refresh() {
-  const jobs = await fetch('/api/jobs').then(r => r.json());
+  let jobs = await fetch('/api/jobs').then(r => r.json());
+  jobs = jobs.filter(withinTimeWindow);
   jobs.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
 
   // rebuilding the table wipes DOM nodes (and their scrollTop) every tick -- save scroll
