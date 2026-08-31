@@ -32,7 +32,7 @@
 <h1>codex-scheduler</h1>
 <table>
   <thead>
-    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Effort</th><th>Fast</th><th>Session</th><th>Workspace</th></tr>
+    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Model</th><th>Effort</th><th>Fast</th><th>Session</th><th>Workspace</th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -55,6 +55,7 @@ async function refresh() {
       <td>${j.id}</td>
       <td class="slug">${esc(j.slug)}${deps ? `<div class="deps">deps: ${esc(deps)}</div>` : ''}</td>
       <td><span class="badge ${j.status}">${j.status}</span></td>
+      <td>${esc(j.model)}</td>
       <td>${esc(j.effort)}</td>
       <td>${j.fast_mode ? 'yes' : ''}</td>
       <td>${esc((j.claude_session_id || '').slice(0, 8))}</td>
@@ -65,7 +66,7 @@ async function refresh() {
     const detail = document.createElement('tr');
     detail.className = 'detail' + (openSlugs.has(j.slug) ? ' open' : '');
     detail.id = 'detail-' + j.slug;
-    detail.innerHTML = `<td colspan="7">
+    detail.innerHTML = `<td colspan="8">
       <div class="meta">created ${esc(j.created_at)} · started ${esc(j.started_at || '-')} · finished ${esc(j.finished_at || '-')}</div>
       ${j.error ? `<div class="meta" style="color:#f85149">error: ${esc(j.error)}</div>` : ''}
       <pre id="log-${j.slug}"></pre>
