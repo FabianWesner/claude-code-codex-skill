@@ -338,9 +338,10 @@ def cmd_stop(args):
             conn.commit()
             print(f"removed queued job #{job['id']} ({args.slug})")
             return
+        cause = f"stopped by Claude: {args.reason}" if args.reason else "stopped by Claude"
         conn.execute(
-            "UPDATE jobs SET status='stopped', finished_at=? WHERE id=? AND status='running'",
-            (db.now_iso(), job["id"]),
+            "UPDATE jobs SET status='stopped', error=?, finished_at=? WHERE id=? AND status='running'",
+            (cause, db.now_iso(), job["id"]),
         )
         conn.commit()
     finally:
@@ -516,6 +517,7 @@ def build_parser():
 
     s = sub.add_parser("stop")
     s.add_argument("slug")
+    s.add_argument("--reason", help="why it's being stopped -- recorded as the job's error/cause")
     s.set_defaults(func=cmd_stop)
 
     s = sub.add_parser("rm")

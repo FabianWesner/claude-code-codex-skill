@@ -75,7 +75,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
 | `wait --session [--slugs a,b --all] [--timeout secs]` | block until a job settles (see above) |
 | `steer <slug> "<text>"` | mid-flight correction into a *running* job |
-| `stop <slug>` | interrupt+quit a running job (or delete if still queued) |
+| `stop <slug> [--reason "..."]` | interrupt+quit a running job (or delete if still queued); records why in the job's `error` field so `show`/the dashboard can distinguish an intentional stop from an actual failure |
 | `rm <slug> [--cascade]` | remove a *queued* job (refuses if queued dependents exist, unless `--cascade`) |
 | `edit <slug> [--prompt\|--prompt-file] [--deps] [--priority] [--effort]` | edit a *queued* job |
 | `reorder <slug1> <slug2> ...` | set priority = list order among queued jobs |

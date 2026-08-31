@@ -14,6 +14,7 @@
   tr.job-row { cursor: pointer; }
   tr.job-row:hover { background: #161b22; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge[title] { cursor: help; }
   .queued { background: #30363d; color: #c9d1d9; }
   .running { background: #1f6feb33; color: #58a6ff; }
   .done { background: #23863633; color: #3fb950; }
@@ -51,7 +52,45 @@ const rowsEl = document.getElementById('rows');
 const openSlugs = new Set();
 const logOffsets = {};
 const logText = {};
+const showFullLog = new Set();
 const LOG_TAIL_LINES = 100;
+const SHOWN_ITEM_TYPES = new Set(['agentMessage', 'commandExecution']);
+
+// progress.log is a flat stream: a "[item TYPE] desc" marker line, then raw streamed text
+// belonging to that item until the next "[...]" marker line. Filter by grouping continuation
+// lines with the marker that introduced them.
+function filterLog(text) {
+  const itemRe = /^\[item (\w+)\]/;
+  const markerRe = /^\[/;
+  let currentType = null; // null = always-shown context (not inside a filterable item block)
+  const out = [];
+  for (const line of text.split('\n')) {
+    const im = line.match(itemRe);
+    if (im) {
+      currentType = im[1];
+      if (SHOWN_ITEM_TYPES.has(currentType)) out.push(line);
+      continue;
+    }
+    if (markerRe.test(line)) {
+      currentType = null;
+      out.push(line);
+      continue;
+    }
+    if (currentType === null || SHOWN_ITEM_TYPES.has(currentType)) out.push(line);
+  }
+  return out.join('\n');
+}
+
+function computeDisplayText(slug) {
+  const full = logText[slug] || '';
+  return tailLines(showFullLog.has(slug) ? full : filterLog(full));
+}
+
+function toggleFull(slug) {
+  if (showFullLog.has(slug)) showFullLog.delete(slug); else showFullLog.add(slug);
+  const pre = document.getElementById('log-' + slug);
+  if (pre) { pre.textContent = computeDisplayText(slug); pre.scrollTop = pre.scrollHeight; }
+}
 
 function esc(s) { return (s ?? '').toString().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
@@ -99,7 +138,7 @@ async function refresh() {
     tr.innerHTML = `
       <td>${j.id}</td>
       <td class="slug">${esc(j.slug)}${deps ? `<div class="deps">deps: ${esc(deps)}</div>` : ''}</td>
-      <td><span class="badge ${j.status}">${j.status}</span></td>
+      <td><span class="badge ${j.status}"${j.error ? ` title="${esc(j.error)}"` : ''}>${j.status}</span></td>
       <td class="updated" title="${esc(j.updated_at)}">${esc(timeAgo(j.updated_at))}</td>
       <td>${esc(j.model)}</td>
       <td>${esc(j.effort)}</td>
@@ -127,7 +166,13 @@ async function refresh() {
           ${steerHtml}
         </div>
         <div class="detail-box">
-          <h4>Output (live, last ${LOG_TAIL_LINES} lines)</h4>
+          <h4 style="display:flex;justify-content:space-between;align-items:center;">
+            <span>Output (live, last ${LOG_TAIL_LINES} lines)</span>
+            <label style="font-weight:normal;text-transform:none;letter-spacing:normal;cursor:pointer;">
+              <input type="checkbox" onchange="toggleFull('${j.slug}')" ${showFullLog.has(j.slug) ? 'checked' : ''}>
+              show all (incl. reasoning / tool calls)
+            </label>
+          </h4>
           <pre id="log-${j.slug}"></pre>
         </div>
       </div>
@@ -138,7 +183,7 @@ async function refresh() {
       const promptEl = document.getElementById('prompt-' + j.slug);
       const outputEl = document.getElementById('log-' + j.slug);
       if (promptEl && state) promptEl.scrollTop = state.prompt;
-      if (outputEl && logText[j.slug]) outputEl.textContent = tailLines(logText[j.slug]);
+      if (outputEl && logText[j.slug] !== undefined) outputEl.textContent = computeDisplayText(j.slug);
       if (outputEl && state) outputEl.scrollTop = state.outputFollow ? outputEl.scrollHeight : state.output;
       pollLog(j.slug);
     }
@@ -172,7 +217,7 @@ async function pollLog(slug) {
       const pre = document.getElementById('log-' + slug);
       if (pre) {
         const follow = isNearBottom(pre);
-        pre.textContent = tailLines(logText[slug]);
+        pre.textContent = computeDisplayText(slug);
         if (follow) pre.scrollTop = pre.scrollHeight;
       }
     }
