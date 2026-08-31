@@ -95,7 +95,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
-| `wait --session [--slugs a,b --all] [--timeout secs]` | block until a job settles or sends a `notify` message (see above) |
+| `wait --session [--slugs a,b --all] [--follow] [--timeout secs]` | block until a job settles or sends a `notify` message (see above); `--follow` keeps streaming further messages instead of returning after the first batch, still stopping as soon as the job settles |
 | `notify <slug> "<text>"` | called *by Codex itself* from inside a running job to message you without ending its turn |
 | `steer <slug> "<text>"` | mid-flight correction into a *running* job |
 | `stop <slug> [--reason "..."]` | interrupt+quit a running job (or delete if still queued); records why in the job's `error` field so `show`/the dashboard can distinguish an intentional stop from an actual failure |
@@ -103,7 +103,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 | `edit <slug> [--prompt\|--prompt-file] [--deps] [--priority] [--effort]` | edit a *queued* job |
 | `reorder <slug1> <slug2> ...` | set priority = list order among queued jobs |
 | `config [--parallel N] [--hang-timeout MIN]` | read/set scheduler-wide settings (live, no restart) |
-| `ui [--port 8787]` | start/reuse the live dashboard, then `open http://localhost:8787` |
+| `ui [--port 1234]` | start/reuse the live dashboard (auto-started already, see below) |
 | `daemon start\|stop\|status` | manual daemon control (usually unnecessary — auto-started) |
 
 `steer`/`stop`/`rm`/`edit`/`reorder` only act on the job's most recent **active** (queued/running)
@@ -147,10 +147,14 @@ for `steer:`/`interrupt`/`quit` lines, exactly like the base skill's session dae
 
 ## Dashboard
 
-`scheduler_cli.py ui` starts a small local, stdlib-only HTTP server (no external dependencies)
-showing a live-updating job table; click a row to expand it and live-tail that job's log. Re-run
-`ui` any time — it detects and reuses an already-running instance on that port instead of
-double-starting.
+Auto-started at **http://localhost:1234** the first time the daemon (re)starts in a session — you
+don't need to run anything to get it. `scheduler_cli.py ui [--port N]` starts/reuses it explicitly
+(e.g. for a different port); it detects and reuses an already-running instance on that port
+instead of double-starting. A small, stdlib-only HTTP server (no external dependencies) showing a
+live-updating job table; click a row to expand it and live-tail that job's log. Each running job's
+row has a **Cancel** button — it stops that job exactly like `scheduler_cli.py stop` would, and
+records `"stopped by the user via the dashboard"` as the cause, so the next `wait` for that job
+tells you plainly that the user did it, not that it failed.
 
 The table's "Working On" column (running jobs only) is a one-line, plain-language summary of what
 a job is doing right now — e.g. "Currently testing the Android mobile app" — regenerated about

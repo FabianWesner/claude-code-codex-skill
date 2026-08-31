@@ -67,8 +67,15 @@ cat .claude/skills/codex-scheduler/SKILL.md
 - getting notified natively (no polling) when a job finishes or fails, via `wait` launched as a
   backgrounded Bash command
 - steering or stopping a running job, and removing/editing/reordering queued ones
-- a live dashboard (`scheduler_cli.py ui`) showing every job's status and a live log tail
+- a live dashboard, auto-started at **http://localhost:1234** the first time the daemon starts in
+  a session (no need to run `scheduler_cli.py ui` yourself unless you want a different port or it
+  isn't already up) — showing every job's status, a "Working On" summary, and a live log tail,
+  with a Cancel button per running job
 - safe concurrent use from multiple Claude sessions and sub-agents at once
+- Codex can message the submitting Claude session mid-run (`notify`), delivered through the same
+  `wait` channel as job completion
+- a daily `npm install -g @openai/codex` before the first job launches each day, so Codex stays
+  current
 
 ## License
 

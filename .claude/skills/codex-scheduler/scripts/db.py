@@ -154,6 +154,28 @@ def job_dir(job_id, slug):
     return os.path.join(JOBS_DIR, f"{job_id}-{slug}")
 
 
+def stop_job(conn, job, cause):
+    """Shared by scheduler_cli.py's `stop` and the dashboard's cancel button, so both go through
+    identical logic. Deletes a still-queued job outright; interrupt+quits a running one and
+    records `cause` in its error field (surfaced to the owning session via the next `wait`)."""
+    if job["status"] == "queued":
+        conn.execute("DELETE FROM jobs WHERE id=? AND status='queued'", (job["id"],))
+        conn.commit()
+        return "removed"
+    updated = conn.execute(
+        "UPDATE jobs SET status='stopped', error=?, finished_at=? WHERE id=? AND status='running'",
+        (cause, now_iso(), job["id"]),
+    ).rowcount
+    conn.commit()
+    if updated and job.get("session_dir"):
+        try:
+            with open(os.path.join(job["session_dir"], "control"), "a") as f:
+                f.write("interrupt\nquit\n")
+        except OSError:
+            pass
+    return "stopped" if updated else None
+
+
 def list_jobs(conn, session_id=None, status=None):
     q = "SELECT * FROM jobs WHERE 1=1"
     args = []

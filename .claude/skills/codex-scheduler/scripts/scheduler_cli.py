@@ -25,6 +25,27 @@ def err(msg):
 
 # ---------------------------------------------------------------- daemon lifecycle
 
+DASHBOARD_PORT = 1234
+
+
+def ensure_dashboard(port=DASHBOARD_PORT):
+    import urllib.request
+
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/jobs", timeout=1)
+        return False  # already running
+    except Exception:
+        pass
+    db.ensure_state_dirs()
+    script = os.path.join(SCRIPT_DIR, "dashboard.py")
+    logf = open(os.path.join(db.STATE_DIR, "dashboard.log"), "a")
+    subprocess.Popen(
+        [sys.executable, script, "--port", str(port)],
+        stdin=subprocess.DEVNULL, stdout=logf, stderr=logf, start_new_session=True, cwd=SCRIPT_DIR,
+    )
+    return True
+
+
 def ensure_daemon():
     pid = db.daemon_pid()
     if pid and db.is_pid_alive(pid):
@@ -38,6 +59,10 @@ def ensure_daemon():
         start_new_session=True, cwd=SCRIPT_DIR,
     )
     _wait_for_daemon(timeout=5)
+    # the daemon only gets (re)spawned here, so this is naturally "first use" of the skill in
+    # this run -- piggyback the dashboard's auto-start on it rather than checking on every call.
+    if ensure_dashboard():
+        print(f"dashboard started at http://localhost:{DASHBOARD_PORT}", file=sys.stderr)
 
 
 def _wait_for_daemon(timeout):
@@ -283,7 +308,10 @@ def cmd_wait(args):
                     print(f"--- message from job #{r['job_id']} ({r['slug']}) at {r['created_at']} ---")
                     print(r["text"])
                     print()
-                return
+                if not args.follow:
+                    return
+                # --follow: keep the connection loop going -- fall through to the terminal-status
+                # check below so a job settling right after a message still ends the wait.
 
             q = "SELECT * FROM jobs WHERE claude_session_id=? AND notified=0 AND status IN ('done','failed','stopped')"
             args_l = [args.session]
@@ -380,23 +408,14 @@ def cmd_stop(args):
         job = db.find_job_by_slug(conn, args.slug, active_only=True)
         if not job:
             err(f"no active (queued/running) job with slug '{args.slug}'")
-        if job["status"] == "queued":
-            conn.execute("DELETE FROM jobs WHERE id=? AND status='queued'", (job["id"],))
-            conn.commit()
-            print(f"removed queued job #{job['id']} ({args.slug})")
-            return
         cause = f"stopped by Claude: {args.reason}" if args.reason else "stopped by Claude"
-        conn.execute(
-            "UPDATE jobs SET status='stopped', error=?, finished_at=? WHERE id=? AND status='running'",
-            (cause, db.now_iso(), job["id"]),
-        )
-        conn.commit()
+        result = db.stop_job(conn, job, cause)
     finally:
         conn.close()
-    if job["session_dir"]:
-        with open(os.path.join(job["session_dir"], "control"), "a") as f:
-            f.write("interrupt\nquit\n")
-    print(f"stopped job #{job['id']} ({args.slug})")
+    if result == "removed":
+        print(f"removed queued job #{job['id']} ({args.slug})")
+    else:
+        print(f"stopped job #{job['id']} ({args.slug})")
 
 
 # ---------------------------------------------------------------- rm / edit / reorder
@@ -495,23 +514,11 @@ def cmd_config(args):
 
 
 def cmd_ui(args):
-    import urllib.request
-
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:{args.port}/api/jobs", timeout=1)
+    if ensure_dashboard(args.port):
+        time.sleep(0.5)
+        print(f"dashboard starting at http://localhost:{args.port}")
+    else:
         print(f"dashboard already running at http://localhost:{args.port}")
-        return
-    except Exception:
-        pass
-    script = os.path.join(SCRIPT_DIR, "dashboard.py")
-    logf = open(os.path.join(db.STATE_DIR, "dashboard.log"), "a")
-    db.ensure_state_dirs()
-    subprocess.Popen(
-        [sys.executable, script, "--port", str(args.port)],
-        stdin=subprocess.DEVNULL, stdout=logf, stderr=logf, start_new_session=True, cwd=SCRIPT_DIR,
-    )
-    time.sleep(0.5)
-    print(f"dashboard starting at http://localhost:{args.port}")
 
 
 # ---------------------------------------------------------------- argparse wiring
@@ -555,6 +562,9 @@ def build_parser():
     s.add_argument("--slugs")
     s.add_argument("--all", action="store_true")
     s.add_argument("--timeout", type=float, default=0)
+    s.add_argument("--follow", action="store_true",
+                    help="keep streaming notify messages instead of returning after the first batch; "
+                         "still returns as soon as a matching job reaches a terminal status")
     s.set_defaults(func=cmd_wait)
 
     s = sub.add_parser("notify")
@@ -596,7 +606,7 @@ def build_parser():
     s.set_defaults(func=cmd_config)
 
     s = sub.add_parser("ui")
-    s.add_argument("--port", type=int, default=8787)
+    s.add_argument("--port", type=int, default=DASHBOARD_PORT)
     s.set_defaults(func=cmd_ui)
 
     s = sub.add_parser("daemon")

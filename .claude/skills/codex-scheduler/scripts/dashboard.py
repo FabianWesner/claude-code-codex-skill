@@ -2,7 +2,9 @@
 """codex-scheduler live dashboard: stdlib-only HTTP server (no dependencies) serving a JSON API
 plus static/index.html, which polls the API to show a live job table + per-job log tail.
 
-Read-only against the shared SQLite DB -- never mutates scheduler state.
+Read-only except for one endpoint: POST /api/jobs/<slug>/stop, the dashboard's Cancel button. It
+goes through db.stop_job() -- the same code path scheduler_cli.py's `stop` uses -- with a cause
+that says the user did it via the dashboard, so the owning Claude session's next `wait` sees why.
 """
 import argparse
 import json
@@ -135,6 +137,24 @@ class Handler(BaseHTTPRequestHandler):
 
         self._text("not found", status=404)
 
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "stop":
+            slug = parts[2]
+            conn = db.connect()
+            try:
+                job = db.find_job_by_slug(conn, slug, active_only=True)
+                if not job:
+                    self._json({"error": "no active job with that slug"}, status=404)
+                    return
+                result = db.stop_job(conn, job, "stopped by the user via the dashboard")
+            finally:
+                conn.close()
+            self._json({"result": result})
+            return
+        self._text("not found", status=404)
+
 
 class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
@@ -143,7 +163,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=8787)
+    ap.add_argument("--port", type=int, default=1234)
     args = ap.parse_args()
     with Server(("127.0.0.1", args.port), Handler) as httpd:
         print(f"codex-scheduler dashboard listening on http://127.0.0.1:{args.port}", flush=True)

@@ -15,6 +15,9 @@
   tr.job-row:hover { background: #161b22; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge[title] { cursor: help; }
+  .cancel-btn { margin-left: 6px; font-size: 10px; padding: 1px 6px; border-radius: 8px;
+                background: transparent; color: #f85149; border: 1px solid #da363355; cursor: pointer; }
+  .cancel-btn:hover { background: #da363322; }
   .queued { background: #30363d; color: #c9d1d9; }
   .running { background: #1f6feb33; color: #58a6ff; }
   .done { background: #23863633; color: #3fb950; }
@@ -57,7 +60,7 @@
 </div>
 <table>
   <thead>
-    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Working On</th><th>Updated</th><th>Model</th><th>Effort</th><th>Fast</th><th>Session</th><th>Workspace</th></tr>
+    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Working On</th><th>Runtime</th><th>Updated</th><th>Model</th><th>Effort</th><th>Workspace</th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -107,6 +110,15 @@ function toggleFull(slug) {
   if (pre) { pre.textContent = computeDisplayText(slug); pre.scrollTop = pre.scrollHeight; }
 }
 
+async function cancelJob(slug, ev) {
+  ev.stopPropagation();
+  if (!confirm(`Cancel job "${slug}"? The Claude session that submitted it will be told you did this.`)) return;
+  try {
+    await fetch(`/api/jobs/${encodeURIComponent(slug)}/stop`, { method: 'POST' });
+  } catch (e) {}
+  refresh();
+}
+
 function esc(s) { return (s ?? '').toString().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 function timeAgo(iso) {
@@ -121,6 +133,33 @@ function timeAgo(iso) {
   const hrs = Math.round(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.round(hrs / 24)}d ago`;
+}
+
+function toEpoch(iso) {
+  if (!iso) return NaN;
+  return new Date(iso.endsWith('Z') ? iso : iso + 'Z').getTime();
+}
+
+function formatDuration(secs) {
+  secs = Math.max(0, Math.round(secs));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h${mins % 60}m`;
+}
+
+function runtimeFor(j) {
+  if (!j.started_at) return '-';
+  const start = toEpoch(j.started_at);
+  if (isNaN(start)) return '-';
+  const end = j.status === 'running' ? Date.now() : toEpoch(j.finished_at) || Date.now();
+  return formatDuration((end - start) / 1000);
+}
+
+function shortWorkspace(path) {
+  const parts = (path || '').split('/').filter(Boolean);
+  return parts.slice(-2).join('/') || path;
 }
 
 function isNearBottom(el) {
@@ -149,7 +188,7 @@ function withinTimeWindow(j) {
 async function refresh() {
   let jobs = await fetch('/api/jobs').then(r => r.json());
   jobs = jobs.filter(withinTimeWindow);
-  jobs.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  jobs.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
   // rebuilding the table wipes DOM nodes (and their scrollTop) every tick -- save scroll
   // positions (page + any open prompt/output boxes) first, restore after rebuilding.
@@ -173,14 +212,16 @@ async function refresh() {
     tr.innerHTML = `
       <td>${j.id}</td>
       <td class="slug">${esc(j.slug)}${deps ? `<div class="deps">deps: ${esc(deps)}</div>` : ''}</td>
-      <td><span class="badge ${j.status}"${j.error ? ` title="${esc(j.error)}"` : ''}>${j.status}</span></td>
+      <td>
+        <span class="badge ${j.status}"${j.error ? ` title="${esc(j.error)}"` : ''}>${j.status}</span>
+        ${j.status === 'running' ? `<button class="cancel-btn" onclick="cancelJob('${j.slug}', event)">cancel</button>` : ''}
+      </td>
       <td class="working-on">${j.status === 'running' ? (j.working_on ? esc(j.working_on) : '<span class="none">starting…</span>') : ''}</td>
+      <td class="updated">${esc(runtimeFor(j))}</td>
       <td class="updated" title="${esc(j.updated_at)}">${esc(timeAgo(j.updated_at))}</td>
       <td>${esc(j.model)}</td>
-      <td>${esc(j.effort)}</td>
-      <td>${j.fast_mode ? 'yes' : ''}</td>
-      <td>${esc((j.claude_session_id || '').slice(0, 8))}</td>
-      <td>${esc(j.workspace)}</td>`;
+      <td>${esc(j.effort)}${j.fast_mode ? '/fast' : ''}</td>
+      <td title="${esc(j.workspace)}">${esc(shortWorkspace(j.workspace))}</td>`;
     tr.onclick = () => toggle(j.slug);
     rowsEl.appendChild(tr);
 
@@ -191,7 +232,7 @@ async function refresh() {
     const steerHtml = steers.length
       ? `<ol class="steer-list">${steers.map(s => `<li>${esc(s)}</li>`).join('')}</ol>`
       : `<div class="steer-list"><span class="none">(none)</span></div>`;
-    detail.innerHTML = `<td colspan="10">
+    detail.innerHTML = `<td colspan="9">
       <div class="meta">created ${esc(j.created_at)} · started ${esc(j.started_at || '-')} · finished ${esc(j.finished_at || '-')}</div>
       ${j.error ? `<div class="meta" style="color:#f85149">error: ${esc(j.error)}</div>` : ''}
       <div class="detail-grid">
