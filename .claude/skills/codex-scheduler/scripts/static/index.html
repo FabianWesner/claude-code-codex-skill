@@ -69,8 +69,28 @@ function timeAgo(iso) {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
+function isNearBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+}
+
 async function refresh() {
   const jobs = await fetch('/api/jobs').then(r => r.json());
+  jobs.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+
+  // rebuilding the table wipes DOM nodes (and their scrollTop) every tick -- save scroll
+  // positions (page + any open prompt/output boxes) first, restore after rebuilding.
+  const pageScroll = window.scrollY;
+  const scrollState = {};
+  for (const slug of openSlugs) {
+    const p = document.getElementById('prompt-' + slug);
+    const o = document.getElementById('log-' + slug);
+    scrollState[slug] = {
+      prompt: p ? p.scrollTop : 0,
+      output: o ? o.scrollTop : 0,
+      outputFollow: o ? isNearBottom(o) : true,
+    };
+  }
+
   rowsEl.innerHTML = '';
   for (const j of jobs) {
     const tr = document.createElement('tr');
@@ -102,7 +122,7 @@ async function refresh() {
       <div class="detail-grid">
         <div class="detail-box">
           <h4>Prompt</h4>
-          <pre>${esc(j.prompt)}</pre>
+          <pre id="prompt-${j.slug}">${esc(j.prompt)}</pre>
           <h4>Steering</h4>
           ${steerHtml}
         </div>
@@ -114,11 +134,16 @@ async function refresh() {
     </td>`;
     rowsEl.appendChild(detail);
     if (openSlugs.has(j.slug)) {
-      const pre = document.getElementById('log-' + j.slug);
-      if (pre && logText[j.slug]) pre.textContent = tailLines(logText[j.slug]);
+      const state = scrollState[j.slug];
+      const promptEl = document.getElementById('prompt-' + j.slug);
+      const outputEl = document.getElementById('log-' + j.slug);
+      if (promptEl && state) promptEl.scrollTop = state.prompt;
+      if (outputEl && logText[j.slug]) outputEl.textContent = tailLines(logText[j.slug]);
+      if (outputEl && state) outputEl.scrollTop = state.outputFollow ? outputEl.scrollHeight : state.output;
       pollLog(j.slug);
     }
   }
+  window.scrollTo(0, pageScroll);
 }
 
 function tailLines(text) {
@@ -145,7 +170,11 @@ async function pollLog(slug) {
     if (r.text) {
       logText[slug] = (logText[slug] || '') + r.text;
       const pre = document.getElementById('log-' + slug);
-      if (pre) { pre.textContent = tailLines(logText[slug]); pre.scrollTop = pre.scrollHeight; }
+      if (pre) {
+        const follow = isNearBottom(pre);
+        pre.textContent = tailLines(logText[slug]);
+        if (follow) pre.scrollTop = pre.scrollHeight;
+      }
     }
   } catch (e) {}
 }
