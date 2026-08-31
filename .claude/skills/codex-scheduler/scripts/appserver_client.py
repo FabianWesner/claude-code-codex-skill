@@ -24,6 +24,19 @@ SANDBOX_MAP = {
     "danger-full-access": {"type": "dangerFullAccess"},
 }
 
+_CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_cli.py")
+
+NOTIFY_PREAMBLE = (
+    '[scheduler] Your job slug is "{slug}". If you want to send a status update, ask a question, '
+    "or flag something to the Claude session that queued this job WITHOUT ending your turn, run "
+    "this shell command:\n"
+    '  python3 {cli} notify {slug} "<message>"\n'
+    "It delivers immediately and does not end your turn -- keep working after sending it. Your "
+    "final reply when you finish this turn still becomes the job's result as usual, so only use "
+    "this for something worth surfacing before you're done (a question, a heads-up, an early "
+    "finding) -- not for routine narration.\n\n"
+)
+
 
 class Conn:
     """One `codex app-server` subprocess + JSON-RPC 2.0 stdio connection."""
@@ -182,11 +195,12 @@ class JobSession:
                 f"sandbox={self.job.get('sandbox')} fast={bool(self.job.get('fast_mode'))}]"
             )
             self._write_status()
+            full_prompt = NOTIFY_PREAMBLE.format(slug=self.job["slug"], cli=_CLI_PATH) + prompt
             r = self.conn.request(
                 "turn/start",
                 {
                     "threadId": self.thread,
-                    "input": [{"type": "text", "text": prompt}],
+                    "input": [{"type": "text", "text": full_prompt}],
                     "model": self.job.get("model") or "gpt-5.6-sol",
                     "effort": self.job.get("effort") or "medium",
                     "sandboxPolicy": sb,

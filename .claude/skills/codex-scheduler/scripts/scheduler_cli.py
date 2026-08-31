@@ -263,6 +263,25 @@ def cmd_wait(args):
     while True:
         conn = db.connect()
         try:
+            mq = """SELECT m.id AS mid, m.text AS text, m.created_at AS created_at,
+                           j.id AS job_id, j.slug AS slug
+                    FROM job_messages m JOIN jobs j ON j.id = m.job_id
+                    WHERE j.claude_session_id=? AND m.notified=0"""
+            margs = [args.session]
+            if slugs:
+                mq += f" AND j.slug IN ({','.join('?' * len(slugs))})"
+                margs += slugs
+            mrows = [dict(r) for r in conn.execute(mq, margs).fetchall()]
+            if mrows:
+                ids = [r["mid"] for r in mrows]
+                conn.execute(f"UPDATE job_messages SET notified=1 WHERE id IN ({','.join('?' * len(ids))})", ids)
+                conn.commit()
+                for r in mrows:
+                    print(f"--- message from job #{r['job_id']} ({r['slug']}) at {r['created_at']} ---")
+                    print(r["text"])
+                    print()
+                return
+
             q = "SELECT * FROM jobs WHERE claude_session_id=? AND notified=0 AND status IN ('done','failed','stopped')"
             args_l = [args.session]
             if slugs:
@@ -299,6 +318,31 @@ def cmd_wait(args):
         if args.timeout and time.time() - start > args.timeout:
             err("timeout waiting for job(s) to finish")
         time.sleep(1)
+
+
+# ---------------------------------------------------------------- notify (called BY Codex)
+
+def cmd_notify(args):
+    """Called from *inside* a running job's own shell (Codex invokes this itself -- see the
+    notify preamble every job prompt gets, in appserver_client.py) to send Claude an ad-hoc
+    message without ending the turn. Delivered through the same channel as job completion:
+    the next `wait` for that job's session returns it immediately."""
+    conn = db.connect()
+    try:
+        job = db.find_job_by_slug(conn, args.slug, active_only=True)
+        if not job:
+            err(f"no active job with slug '{args.slug}'")
+        conn.execute("INSERT INTO job_messages (job_id, text) VALUES (?, ?)", (job["id"], args.text))
+        conn.commit()
+    finally:
+        conn.close()
+    if job.get("session_dir"):
+        try:
+            with open(os.path.join(job["session_dir"], "progress.log"), "a") as f:
+                f.write(f"\n[message] {args.text}\n")
+        except OSError:
+            pass
+    print(f"message queued for job #{job['id']} ({args.slug})")
 
 
 def _print_result(job):
@@ -509,6 +553,11 @@ def build_parser():
     s.add_argument("--all", action="store_true")
     s.add_argument("--timeout", type=float, default=0)
     s.set_defaults(func=cmd_wait)
+
+    s = sub.add_parser("notify")
+    s.add_argument("slug")
+    s.add_argument("text")
+    s.set_defaults(func=cmd_notify)
 
     s = sub.add_parser("steer")
     s.add_argument("slug")

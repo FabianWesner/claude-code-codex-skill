@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS job_deps (
 );
 CREATE INDEX IF NOT EXISTS job_deps_job ON job_deps(job_id);
 
+CREATE TABLE IF NOT EXISTS job_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id),
+  text TEXT NOT NULL,
+  notified INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS job_messages_job ON job_messages(job_id);
+
 CREATE TABLE IF NOT EXISTS config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   parallel_limit INTEGER NOT NULL DEFAULT 3,

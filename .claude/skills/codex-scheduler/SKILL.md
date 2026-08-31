@@ -63,6 +63,28 @@ python3 .../scheduler_cli.py wait --session <id> --slugs gen-a,gen-b,merge --all
 dependents are automatically marked `failed` too (never retried, never left stuck queued) — check
 `show <slug>` for the `error` field explaining why.
 
+## Codex can message you back mid-run
+
+Every job's prompt automatically gets a short preamble telling Codex it can send you an ad-hoc
+message *without* ending its turn, by running:
+
+```bash
+python3 .../scheduler_cli.py notify <its-own-slug> "<message>"
+```
+
+This goes through the same channel as job completion — the next `wait` for that session returns
+it immediately (before the job itself finishes), tagged as a message rather than a result, and it
+also appears live in the dashboard's output panel. Use it for jobs where you want an early
+heads-up, a question, or a checkpoint instead of waiting for the whole turn — no need to explain
+the mechanism yourself, Codex is already told about it.
+
+**Caveat (verified 2026-08-31):** Codex following this instruction is not guaranteed, especially
+at low effort — in testing, `gpt-5.6-luna`/`low` ignored the preamble even when the job's own
+prompt explicitly told it to notify first thing. The delivery mechanism itself is solid (confirmed
+by calling `notify` directly against a running job); getting Codex to *use* it reliably is a
+prompt-engineering problem like any other instruction-following case — higher effort and making it
+part of the job's own explicit task description (not just relying on the preamble alone) help.
+
 ## Command reference
 
 All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <cmd> ...`
@@ -73,7 +95,8 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
-| `wait --session [--slugs a,b --all] [--timeout secs]` | block until a job settles (see above) |
+| `wait --session [--slugs a,b --all] [--timeout secs]` | block until a job settles or sends a `notify` message (see above) |
+| `notify <slug> "<text>"` | called *by Codex itself* from inside a running job to message you without ending its turn |
 | `steer <slug> "<text>"` | mid-flight correction into a *running* job |
 | `stop <slug> [--reason "..."]` | interrupt+quit a running job (or delete if still queued); records why in the job's `error` field so `show`/the dashboard can distinguish an intentional stop from an actual failure |
 | `rm <slug> [--cascade]` | remove a *queued* job (refuses if queued dependents exist, unless `--cascade`) |
