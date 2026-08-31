@@ -86,11 +86,35 @@ def cmd_daemon(args):
         print(f"daemon running, pid={pid}" if db.is_pid_alive(pid) else "failed to start daemon")
     elif args.action == "stop":
         pid = db.daemon_pid()
-        if pid and db.is_pid_alive(pid):
-            os.kill(pid, 15)
-            print(f"sent SIGTERM to daemon pid={pid}")
-        else:
+        if not (pid and db.is_pid_alive(pid)):
             print("daemon not running")
+            return
+        if args.graceful:
+            with open(db.DRAIN_MARKER, "w") as f:
+                f.write(db.now_iso())
+            print("draining: no new jobs will launch; waiting for running ones to finish naturally...")
+            start = time.time()
+            while True:
+                conn = db.connect()
+                running = conn.execute("SELECT COUNT(*) c FROM jobs WHERE status='running'").fetchone()["c"]
+                conn.close()
+                if running == 0:
+                    break
+                if args.timeout and time.time() - start > args.timeout:
+                    print(f"gave up after {args.timeout}s with {running} job(s) still running -- "
+                          f"NOT stopping (rerun without --graceful to force, or wait and retry)")
+                    try:
+                        os.remove(db.DRAIN_MARKER)
+                    except OSError:
+                        pass
+                    return
+                time.sleep(2)
+        os.kill(pid, 15)
+        try:
+            os.remove(db.DRAIN_MARKER)
+        except OSError:
+            pass
+        print(f"sent SIGTERM to daemon pid={pid}")
 
 
 # ---------------------------------------------------------------- validation / helpers
@@ -611,6 +635,10 @@ def build_parser():
 
     s = sub.add_parser("daemon")
     s.add_argument("action", choices=["start", "stop", "status"])
+    s.add_argument("--graceful", action="store_true",
+                    help="for stop: wait for running jobs to finish naturally instead of killing them")
+    s.add_argument("--timeout", type=float, default=0,
+                    help="for stop --graceful: give up after N seconds if jobs are still running (0 = wait indefinitely)")
     s.set_defaults(func=cmd_daemon)
 
     return p

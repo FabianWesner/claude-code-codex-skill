@@ -15,9 +15,9 @@
   tr.job-row:hover { background: #161b22; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge[title] { cursor: help; }
-  .cancel-btn { margin-left: 6px; font-size: 10px; padding: 1px 6px; border-radius: 8px;
-                background: transparent; color: #f85149; border: 1px solid #da363355; cursor: pointer; }
-  .cancel-btn:hover { background: #da363322; }
+  .cancel-btn { background: transparent; border: none; color: #8b949e; cursor: pointer;
+                padding: 3px; border-radius: 4px; display: inline-flex; }
+  .cancel-btn:hover { color: #f85149; background: #f8514922; }
   .queued { background: #30363d; color: #c9d1d9; }
   .running { background: #1f6feb33; color: #58a6ff; }
   .done { background: #23863633; color: #3fb950; }
@@ -60,7 +60,7 @@
 </div>
 <table>
   <thead>
-    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Working On</th><th>Runtime</th><th>Updated</th><th>Model</th><th>Effort</th><th>Workspace</th></tr>
+    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Working On</th><th>Runtime</th><th>Updated</th><th>Model</th><th>Effort</th><th>Workspace</th><th></th></tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -162,6 +162,21 @@ function shortWorkspace(path) {
   return parts.slice(-2).join('/') || path;
 }
 
+const TRASH_ICON = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">' +
+  '<path d="M6 1.5a.5.5 0 0 0-.5.5v1H2.5a.5.5 0 0 0 0 1H3v9.5A1.5 1.5 0 0 0 4.5 15h7a1.5 1.5 0 0 0 ' +
+  '1.5-1.5V4h.5a.5.5 0 0 0 0-1H10V2a.5.5 0 0 0-.5-.5h-3.5zm.5 2V3h3v.5h-3zM4.5 4h7v9.5a.5.5 0 0 1-.5.5h' +
+  '-6a.5.5 0 0 1-.5-.5V4zm2 2a.5.5 0 0 0-.5.5v6a.5.5 0 0 0 1 0v-6a.5.5 0 0 0-.5-.5zm3 0a.5.5 0 0 0-.5.5v' +
+  '6a.5.5 0 0 0 1 0v-6a.5.5 0 0 0-.5-.5z"/></svg>';
+
+function woHistoryTooltip(j) {
+  const hist = j.working_on_history || [];
+  if (!hist.length) return '';
+  return hist.map(h => {
+    const t = (h.created_at || '').split('T')[1]?.split('.')[0] || '';
+    return `[${t}] ${h.text}`;
+  }).join('\n');
+}
+
 function isNearBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 24;
 }
@@ -212,16 +227,14 @@ async function refresh() {
     tr.innerHTML = `
       <td>${j.id}</td>
       <td class="slug">${esc(j.slug)}${deps ? `<div class="deps">deps: ${esc(deps)}</div>` : ''}</td>
-      <td>
-        <span class="badge ${j.status}"${j.error ? ` title="${esc(j.error)}"` : ''}>${j.status}</span>
-        ${j.status === 'running' ? `<button class="cancel-btn" onclick="cancelJob('${j.slug}', event)">cancel</button>` : ''}
-      </td>
-      <td class="working-on">${j.status === 'running' ? (j.working_on ? esc(j.working_on) : '<span class="none">starting…</span>') : ''}</td>
+      <td><span class="badge ${j.status}"${j.error ? ` title="${esc(j.error)}"` : ''}>${j.status}</span></td>
+      <td class="working-on"${woHistoryTooltip(j) ? ` title="${esc(woHistoryTooltip(j))}"` : ''}>${j.status === 'running' ? (j.working_on ? esc(j.working_on) : '<span class="none">starting…</span>') : ''}</td>
       <td class="updated">${esc(runtimeFor(j))}</td>
       <td class="updated" title="${esc(j.updated_at)}">${esc(timeAgo(j.updated_at))}</td>
       <td>${esc(j.model)}</td>
       <td>${esc(j.effort)}${j.fast_mode ? '/fast' : ''}</td>
-      <td title="${esc(j.workspace)}">${esc(shortWorkspace(j.workspace))}</td>`;
+      <td title="${esc(j.workspace)}">${esc(shortWorkspace(j.workspace))}</td>
+      <td>${j.status === 'running' ? `<button class="cancel-btn" title="Cancel this job" onclick="cancelJob('${j.slug}', event)">${TRASH_ICON}</button>` : ''}</td>`;
     tr.onclick = () => toggle(j.slug);
     rowsEl.appendChild(tr);
 
@@ -232,7 +245,7 @@ async function refresh() {
     const steerHtml = steers.length
       ? `<ol class="steer-list">${steers.map(s => `<li>${esc(s)}</li>`).join('')}</ol>`
       : `<div class="steer-list"><span class="none">(none)</span></div>`;
-    detail.innerHTML = `<td colspan="9">
+    detail.innerHTML = `<td colspan="10">
       <div class="meta">created ${esc(j.created_at)} · started ${esc(j.started_at || '-')} · finished ${esc(j.finished_at || '-')}</div>
       ${j.error ? `<div class="meta" style="color:#f85149">error: ${esc(j.error)}</div>` : ''}
       <div class="detail-grid">

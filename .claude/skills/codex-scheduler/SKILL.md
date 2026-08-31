@@ -105,6 +105,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 | `config [--parallel N] [--hang-timeout MIN]` | read/set scheduler-wide settings (live, no restart) |
 | `ui [--port 1234]` | start/reuse the live dashboard (auto-started already, see below) |
 | `daemon start\|stop\|status` | manual daemon control (usually unnecessary — auto-started) |
+| `daemon stop --graceful [--timeout SECS]` | wait for running jobs to finish before stopping, instead of killing them (see Notes) |
 
 `steer`/`stop`/`rm`/`edit`/`reorder` only act on the job's most recent **active** (queued/running)
 row for that slug — a slug can be reused once its earlier job is terminal.
@@ -176,11 +177,15 @@ open won't do that on its own.
 - Multiple Claude sessions (including Task-tool sub-agents, which inherit the same filesystem and
   Python) can submit/list/wait concurrently — the daemon is a singleton (flock-guarded) and all
   writes go through short SQLite transactions in WAL mode.
-- **Restarting the daemon kills every currently-running job** (recovered as `failed`, per the
-  no-auto-retry policy — see above). The daemon only restarts when it crashes or is explicitly
-  stopped/updated, so this is rare in normal use, but keep it in mind before manually restarting it
-  (`daemon stop` + next command auto-starts it, or editing this skill's own scripts and reloading)
-  while something important is running.
+- **A hard `daemon stop` kills every currently-running job** (recovered as `failed`, per the
+  no-auto-retry policy — see above). This mostly matters when *editing this skill's own scripts* —
+  the daemon doesn't hot-reload, so trying out a code change means stopping and letting the next
+  command respawn it. **Before doing that, always check `list --status running` first, and prefer
+  `daemon stop --graceful [--timeout SECS]`** over a plain `stop` — it stops accepting new job
+  launches and waits (indefinitely by default) for whatever's already running to finish naturally,
+  only then sending the actual stop signal; with `--timeout` it gives up and leaves the daemon
+  running rather than killing anything if jobs are still going. A plain `daemon stop` is fine when
+  `list --status running` is already empty.
 - The daemon checks once per calendar day (on whichever tick first notices the date changed) and
   runs `npm install -g @openai/codex` before launching any new jobs that day, so Codex itself stays
   current — this only gates new job launches, not jobs already running.

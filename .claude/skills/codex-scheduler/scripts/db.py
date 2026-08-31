@@ -18,6 +18,7 @@ JOBS_DIR = os.path.join(STATE_DIR, "jobs")
 DAEMON_PIDFILE = os.path.join(STATE_DIR, "daemon.pid")
 DAEMON_LOCKFILE = os.path.join(STATE_DIR, "daemon.lock")
 DAEMON_LOG = os.path.join(STATE_DIR, "daemon.log")
+DRAIN_MARKER = os.path.join(STATE_DIR, "drain")
 
 TERMINAL_STATUSES = ("done", "failed", "stopped")
 
@@ -63,6 +64,14 @@ CREATE TABLE IF NOT EXISTS job_messages (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS job_messages_job ON job_messages(job_id);
+
+CREATE TABLE IF NOT EXISTS job_working_on_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id),
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS job_working_on_log_job ON job_working_on_log(job_id);
 
 CREATE TABLE IF NOT EXISTS config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -138,6 +147,18 @@ def find_job_by_slug(conn, slug, active_only=False):
             "SELECT * FROM jobs WHERE slug=? ORDER BY id DESC LIMIT 1", (slug,)
         ).fetchone()
     return dict(row) if row else None
+
+
+def add_working_on_entry(conn, job_id, text):
+    conn.execute("INSERT INTO job_working_on_log (job_id, text) VALUES (?, ?)", (job_id, text))
+    conn.commit()
+
+
+def get_working_on_history(conn, job_id):
+    rows = conn.execute(
+        "SELECT text, created_at FROM job_working_on_log WHERE job_id=? ORDER BY id ASC", (job_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_deps(conn, job_id):

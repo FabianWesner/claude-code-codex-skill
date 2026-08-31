@@ -55,6 +55,7 @@ def job_to_json(conn, job):
     job["deps"] = db.get_deps(conn, job["id"])
     job["steers"] = get_steers(job)
     job["updated_at"] = compute_updated_at(job)
+    job["working_on_history"] = db.get_working_on_history(conn, job["id"]) if job["status"] == "running" else []
     return job
 
 

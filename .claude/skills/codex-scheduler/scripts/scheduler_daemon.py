@@ -304,6 +304,7 @@ def _run_summary(job_id, workspace, log_text):
                         (summary, db.now_iso(), job_id),
                     )
                     conn.commit()
+                    db.add_working_on_entry(conn, job_id, summary)
                 finally:
                     conn.close()
     except Exception as e:  # noqa - a summary is a nice-to-have, never worth crashing the daemon
@@ -341,7 +342,8 @@ def tick(state, on_done):
         reap_dead_processes(conn, state)
         cascade_failed_deps(conn)
         ensure_codex_updated_today()
-        if not codex_update_due_today():
+        draining = os.path.exists(db.DRAIN_MARKER)
+        if not codex_update_due_today() and not draining:
             launch_ready_jobs(conn, state, on_done)
         check_hangs(conn, state)
         maybe_summarize(conn, state)
