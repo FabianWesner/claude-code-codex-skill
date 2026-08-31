@@ -1,0 +1,101 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>codex-scheduler</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 20px;
+         background: #0e1116; color: #d8dee4; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 6px 10px; color: #8b949e; font-weight: 500; border-bottom: 1px solid #21262d; }
+  td { padding: 6px 10px; border-bottom: 1px solid #161b22; vertical-align: top; }
+  tr.job-row { cursor: pointer; }
+  tr.job-row:hover { background: #161b22; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .queued { background: #30363d; color: #c9d1d9; }
+  .running { background: #1f6feb33; color: #58a6ff; }
+  .done { background: #23863633; color: #3fb950; }
+  .failed { background: #da363333; color: #f85149; }
+  .stopped { background: #6e768133; color: #8b949e; }
+  .slug { font-family: ui-monospace, monospace; }
+  .deps { color: #8b949e; font-size: 11px; }
+  .detail { display: none; background: #0d1117; }
+  .detail.open { display: table-row; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 340px;
+        overflow-y: auto; background: #010409; padding: 10px; border-radius: 6px; margin: 8px 0 0; }
+  .meta { font-size: 12px; color: #8b949e; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>codex-scheduler</h1>
+<table>
+  <thead>
+    <tr><th>ID</th><th>Slug</th><th>Status</th><th>Effort</th><th>Fast</th><th>Session</th><th>Workspace</th></tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+const rowsEl = document.getElementById('rows');
+const openSlugs = new Set();
+const logOffsets = {};
+
+function esc(s) { return (s ?? '').toString().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+async function refresh() {
+  const jobs = await fetch('/api/jobs').then(r => r.json());
+  rowsEl.innerHTML = '';
+  for (const j of jobs) {
+    const tr = document.createElement('tr');
+    tr.className = 'job-row';
+    const deps = (j.deps || []).map(d => `${d.slug}(${d.status})`).join(', ');
+    tr.innerHTML = `
+      <td>${j.id}</td>
+      <td class="slug">${esc(j.slug)}${deps ? `<div class="deps">deps: ${esc(deps)}</div>` : ''}</td>
+      <td><span class="badge ${j.status}">${j.status}</span></td>
+      <td>${esc(j.effort)}</td>
+      <td>${j.fast_mode ? 'yes' : ''}</td>
+      <td>${esc((j.claude_session_id || '').slice(0, 8))}</td>
+      <td>${esc(j.workspace)}</td>`;
+    tr.onclick = () => toggle(j.slug);
+    rowsEl.appendChild(tr);
+
+    const detail = document.createElement('tr');
+    detail.className = 'detail' + (openSlugs.has(j.slug) ? ' open' : '');
+    detail.id = 'detail-' + j.slug;
+    detail.innerHTML = `<td colspan="7">
+      <div class="meta">created ${esc(j.created_at)} · started ${esc(j.started_at || '-')} · finished ${esc(j.finished_at || '-')}</div>
+      ${j.error ? `<div class="meta" style="color:#f85149">error: ${esc(j.error)}</div>` : ''}
+      <pre id="log-${j.slug}"></pre>
+    </td>`;
+    rowsEl.appendChild(detail);
+    if (openSlugs.has(j.slug)) pollLog(j.slug);
+  }
+}
+
+function toggle(slug) {
+  const el = document.getElementById('detail-' + slug);
+  if (!el) return;
+  if (openSlugs.has(slug)) { openSlugs.delete(slug); el.classList.remove('open'); }
+  else { openSlugs.add(slug); el.classList.add('open'); logOffsets[slug] = 0; pollLog(slug); }
+}
+
+async function pollLog(slug) {
+  if (!openSlugs.has(slug)) return;
+  const offset = logOffsets[slug] || 0;
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(slug)}/log?offset=${offset}`).then(r => r.json());
+    logOffsets[slug] = r.offset;
+    const pre = document.getElementById('log-' + slug);
+    if (pre && r.text) { pre.textContent += r.text; pre.scrollTop = pre.scrollHeight; }
+  } catch (e) {}
+}
+
+setInterval(refresh, 1500);
+setInterval(() => { for (const s of openSlugs) pollLog(s); }, 1500);
+refresh();
+</script>
+</body>
+</html>
