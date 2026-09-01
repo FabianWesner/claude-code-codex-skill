@@ -406,22 +406,35 @@ def cmd_wait(args):
     slugs = [s.strip() for s in args.slugs.split(",")] if args.slugs else None
     start = time.time()
     seen = {}
+    # Per-process message dedup. `notified` is a single global flag, so with several waiters
+    # interested in the same job it cannot also serve as this process's "already printed" record.
+    seen_msgs = set()
     while True:
         conn = db.connect()
         try:
             mq = """SELECT m.id AS mid, m.text AS text, m.created_at AS created_at,
                            j.id AS job_id, j.slug AS slug
                     FROM job_messages m JOIN jobs j ON j.id = m.job_id
-                    WHERE j.claude_session_id=? AND m.notified=0"""
+                    WHERE j.claude_session_id=?"""
             margs = [args.session]
             if slugs:
+                # Explicit slugs: deliver every message for those jobs to THIS waiter, deduped
+                # locally. Filtering on the shared `notified` flag here means whichever waiter
+                # reads first consumes the message and every other waiter watching the same job
+                # never sees it.
                 mq += f" AND j.slug IN ({','.join('?' * len(slugs))})"
                 margs += slugs
+                if seen_msgs:
+                    mq += f" AND m.id NOT IN ({','.join('?' * len(seen_msgs))})"
+                    margs += sorted(seen_msgs)
+            else:
+                mq += " AND m.notified=0"
             mrows = [dict(r) for r in conn.execute(mq, margs).fetchall()]
             if mrows:
                 ids = [r["mid"] for r in mrows]
                 conn.execute(f"UPDATE job_messages SET notified=1 WHERE id IN ({','.join('?' * len(ids))})", ids)
                 conn.commit()
+                seen_msgs.update(r["mid"] for r in mrows)
                 for r in mrows:
                     print(f"--- message from job #{r['job_id']} ({r['slug']}) at {r['created_at']} ---")
                     print(r["text"])
@@ -431,11 +444,19 @@ def cmd_wait(args):
                 # --follow: keep the connection loop going -- fall through to the terminal-status
                 # check below so a job settling right after a message still ends the wait.
 
-            q = "SELECT * FROM jobs WHERE claude_session_id=? AND notified=0 AND status IN ('done','failed','stopped')"
+            # The `notified` flag means "this session has been told about it at least once". It is
+            # the right filter for a catch-all wait, but NOT when specific slugs were requested:
+            # with --all a waiter holds finished slugs in `seen` until the whole set lands, and if
+            # another waiter marks one notified in the meantime it can never reappear here, so the
+            # set never completes and the wait blocks forever. Naming a slug means "tell me about
+            # this job", regardless of who else was told.
+            q = "SELECT * FROM jobs WHERE claude_session_id=? AND status IN ('done','failed','stopped')"
             args_l = [args.session]
             if slugs:
                 q += f" AND slug IN ({','.join('?' * len(slugs))})"
                 args_l += slugs
+            else:
+                q += " AND notified=0"
             rows = [dict(r) for r in conn.execute(q, args_l).fetchall()]
             if rows:
                 if slugs and args.all:
