@@ -12,30 +12,94 @@ in active use.
 """
 import json
 import os
+import re
 import subprocess
 import threading
 import time
 
 import db
 
+# `workspace-write` confines writes to the job's cwd, which does NOT include the scheduler's own
+# state dir -- so notify/checkpoint/answer (which write to the shared SQLite DB) were silently
+# rejected by the sandbox. Granting exactly that one extra root fixes them without widening
+# anything else. `read-only` has no writableRoots option at all in the protocol, which is why the
+# sentinel channel below exists.
 SANDBOX_MAP = {
     "read-only": {"type": "readOnly", "networkAccess": False},
-    "workspace-write": {"type": "workspaceWrite"},
+    "workspace-write": {"type": "workspaceWrite", "writableRoots": [db.STATE_DIR]},
     "danger-full-access": {"type": "dangerFullAccess"},
 }
+
+# Sandbox-proof back-channel: Codex writes these markers into its own message text, which reaches
+# us over the protocol stream and needs no filesystem access whatsoever, so it works identically
+# under read-only, workspace-write and danger-full-access.
+# A marker's content runs to the next blank line, the next marker, or the end of the message --
+# bounded rather than greedy, so ordinary prose written after a marker is not swallowed into it.
+SENTINEL_RE = re.compile(
+    r"\[\[(CHECKPOINT|NOTE)\]\](.*?)(?=\n\s*\n|\[\[(?:CHECKPOINT|NOTE)\]\]|\Z)", re.S
+)
 
 _CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_cli.py")
 
 NOTIFY_PREAMBLE = (
-    '[scheduler] Your job slug is "{slug}". If you want to send a status update, ask a question, '
-    "or flag something to the Claude session that queued this job WITHOUT ending your turn, run "
-    "this shell command:\n"
-    '  python3 {cli} notify {slug} "<message>"\n'
-    "It delivers immediately and does not end your turn -- keep working after sending it. Your "
-    "final reply when you finish this turn still becomes the job's result as usual, so only use "
-    "this for something worth surfacing before you're done (a question, a heads-up, an early "
-    "finding) -- not for routine narration.\n\n"
+    '[scheduler] Your job slug is "{slug}". To send the Claude session that queued this job a '
+    "message WITHOUT ending your turn, write a line starting with the marker [[NOTE]] in any "
+    "message:\n"
+    "  [[NOTE]] found the cause: the retry loop never resets its backoff\n"
+    "The scheduler strips that line out and delivers it immediately; it does not end your turn "
+    "and it does not become part of your result. Use it for something worth surfacing before "
+    "you're done (a question, a heads-up, an early finding) -- not for routine narration.\n"
+    "(There is also a CLI form, `python3 {cli} notify {slug} \"<message>\"`, but it writes to the "
+    "scheduler database and will be BLOCKED by the sandbox unless this job runs with "
+    "danger-full-access. The [[NOTE]] marker always works -- prefer it.)\n\n"
 )
+
+CHECKPOINT_PREAMBLE = (
+    "[scheduler] This job may run for a while. Every few minutes of work, and ALWAYS before "
+    "starting anything long or risky, save your progress by writing a line starting with the "
+    "marker [[CHECKPOINT]] in a message:\n"
+    "  [[CHECKPOINT]] read db.py and daemon.py; state machine mapped; still to do: cli, client\n"
+    "Everything after the marker up to the next blank line is stored as your checkpoint, "
+    "replacing the previous one (so leave a blank line before resuming normal prose). Keep it "
+    "short but self-contained -- findings, "
+    "decisions, what is left. It does not end your turn and it is stripped from your result. If "
+    "this job is stopped, times out, or exceeds its budget, the checkpoint is the ONLY thing that "
+    "survives; without one the work is lost entirely.\n"
+    "(The CLI form `python3 {cli} checkpoint {slug} \"<text>\"` also exists but is blocked by the "
+    "sandbox unless this job runs with danger-full-access -- prefer the marker.)\n\n"
+)
+
+CITE_PREAMBLE = (
+    "[scheduler] EVIDENCE REQUIRED. Every factual claim in your final answer must carry an anchor "
+    "the reader can check independently, placed inline with the claim:\n"
+    "  - about code: `path/to/file.py:LINE` (or LINE-RANGE) that you actually opened this turn\n"
+    "  - about a web source: the URL plus the sentence you are relying on, quoted\n"
+    "  - about behaviour you observed: the exact command you ran and the relevant output line\n"
+    "Do not cite anything you did not actually read this turn -- an invented or approximate line "
+    "number is worse than no citation. If you believe something but cannot anchor it, say so "
+    "explicitly and mark it UNVERIFIED rather than dropping it or dressing it up.\n\n"
+)
+
+SCHEMA_PREAMBLE = (
+    "[scheduler] STRUCTURED OUTPUT REQUIRED. Your FINAL message this turn must be exactly one "
+    "JSON value matching this schema -- no prose before or after it, no markdown code fence:\n"
+    "{schema}\n"
+    "Intermediate messages are free-form; only the last one is parsed. If you cannot fill a "
+    "field, use null rather than omitting it or inventing a value.\n\n"
+)
+
+
+def build_preamble(job, cli_path):
+    """Assemble the per-job instruction block prepended to the user's prompt."""
+    slug = job["slug"]
+    parts = [NOTIFY_PREAMBLE.format(slug=slug, cli=cli_path)]
+    if job.get("max_seconds") or job.get("effort") in ("xhigh", "ultra"):
+        parts.append(CHECKPOINT_PREAMBLE.format(slug=slug, cli=cli_path))
+    if job.get("cite_mode"):
+        parts.append(CITE_PREAMBLE)
+    if job.get("result_schema"):
+        parts.append(SCHEMA_PREAMBLE.format(schema=job["result_schema"]))
+    return "".join(parts)
 
 
 class Conn:
@@ -104,9 +168,14 @@ class JobSession:
     (status in 'done'/'failed') — the daemon uses this to update the DB immediately.
     """
 
-    def __init__(self, job, on_done):
+    def __init__(self, job, on_done, on_tokens=None, on_ask_answer=None,
+                 on_checkpoint=None, on_message=None):
         self.job = job
         self.on_done = on_done
+        self.on_tokens = on_tokens          # (job, tokenUsage dict) -> None
+        self.on_ask_answer = on_ask_answer  # (job, ask_id, answer_text) -> None
+        self.on_checkpoint = on_checkpoint  # (job, text) -> None
+        self.on_message = on_message        # (job, text) -> None
         self.dir = db.job_dir(job["id"], job["slug"])
         os.makedirs(self.dir, exist_ok=True)
         self.ctl = os.path.join(self.dir, "control")
@@ -114,7 +183,11 @@ class JobSession:
         self.logf = open(os.path.join(self.dir, "progress.log"), "a", buffering=1)
         self.thread = None
         self.turn_id = None
-        self.buf = []
+        self.buf = []           # deltas of the agent message currently being streamed
+        self.messages = []      # every completed agent message this turn, in order
+        self._cur_item = None   # type of the item currently streaming
+        self._pending_ask = None  # ask id whose answer we are waiting to capture
+        self._ask_capture = None  # ask id whose answer the current message IS
         self._ctl_offset = 0
         self._settled = False
         self.conn = Conn(self._on_note, fast_mode=bool(job.get("fast_mode")))
@@ -133,32 +206,108 @@ class JobSession:
         except OSError:
             pass
 
+    def _flush_message(self):
+        """Close off the agent message currently streaming into self.buf.
+
+        Previously every delta of every agent message accumulated into ONE buffer that was joined
+        with no separator at turn end, so a spoken preamble was welded onto the front of the real
+        answer ("...approximate ones.# Report"). Messages are now kept separate."""
+        text = "".join(self.buf).strip()
+        self.buf = []
+        text = self._extract_sentinels(text)
+        if not text:
+            return
+        if self._ask_capture is not None:
+            ask_id, self._ask_capture = self._ask_capture, None
+            self.log(f"\n[ask #{ask_id} answered, {len(text)} chars]")
+            if self.on_ask_answer:
+                try:
+                    self.on_ask_answer(self.job, ask_id, text)
+                except Exception as e:  # noqa
+                    self.log(f"[on_ask_answer error: {e}]")
+            return  # an answer to an out-of-band question is not part of the job's result
+        self.messages.append(text)
+
+    def _extract_sentinels(self, text):
+        """Pull [[CHECKPOINT]] / [[NOTE]] blocks out of a message, dispatch them, and return the
+        message with those blocks removed so they never leak into the job's result."""
+        if "[[" not in text:
+            return text
+        found = SENTINEL_RE.findall(text)
+        if not found:
+            return text
+        for kind, body in found:
+            body = body.strip()
+            if not body:
+                continue
+            try:
+                if kind == "CHECKPOINT" and self.on_checkpoint:
+                    self.on_checkpoint(self.job, body)
+                    self.log(f"\n[checkpoint via marker, {len(body)} chars]")
+                elif kind == "NOTE" and self.on_message:
+                    self.on_message(self.job, body)
+                    self.log(f"\n[message via marker] {body[:160]}")
+            except Exception as e:  # noqa
+                self.log(f"[sentinel dispatch error: {e}]")
+        return SENTINEL_RE.sub("", text).strip()
+
+    def _final_result(self):
+        """The job's result is the LAST agent message, not every message concatenated. Falls back
+        to joining (separated) if the last one is somehow empty."""
+        if self.messages:
+            return self.messages[-1]
+        return ""
+
     def _on_note(self, method, params, req_id):
         if method == "turn/started":
             self.turn_id = (params.get("turn") or {}).get("id")
-            self.buf = []
+            self.buf, self.messages, self._cur_item = [], [], None
             self.log(f"[turn started id={self.turn_id}]")
         elif method and method.endswith("/delta") and "delta" in params:
             self.buf.append(params["delta"])
             self.logf.write(params["delta"])
+        elif method == "thread/tokenUsage/updated":
+            usage = params.get("tokenUsage") or {}
+            tot = usage.get("total") or {}
+            self.log(
+                f"\n[tokens in={tot.get('inputTokens')} cached={tot.get('cachedInputTokens')} "
+                f"out={tot.get('outputTokens')} reasoning={tot.get('reasoningOutputTokens')} "
+                f"total={tot.get('totalTokens')}]"
+            )
+            if self.on_tokens:
+                try:
+                    self.on_tokens(self.job, usage)
+                except Exception as e:  # noqa
+                    self.log(f"[on_tokens error: {e}]")
         elif method == "item/started":
             it = params.get("item") or {}
-            desc = it.get("command") or it.get("text") or it.get("type") or ""
+            itype = it.get("type", "?")
+            self._flush_message()  # the previous message (if any) ended when this item began
+            self._cur_item = itype
+            if itype == "agentMessage" and self._pending_ask is not None:
+                # this message is Codex answering the question `ask` just steered in
+                self._ask_capture, self._pending_ask = self._pending_ask, None
+            desc = it.get("command") or it.get("text") or itype or ""
             if isinstance(desc, list):
                 desc = " ".join(map(str, desc))
             if desc:
-                self.log(f"\n[item {it.get('type', '?')}] {str(desc)[:200]}")
+                self.log(f"\n[item {itype}] {str(desc)[:200]}")
         elif method == "turn/completed":
-            final = "".join(self.buf).strip()
+            self._flush_message()
+            final = self._final_result()
             try:
                 with open(os.path.join(self.dir, "result.txt"), "w") as f:
                     f.write(final)
             except OSError:
                 pass
             self.turn_id = None
-            self.log(f"\n[turn complete -> result.txt, {len(final)} chars]")
+            self.log(
+                f"\n[turn complete -> result.txt, {len(final)} chars "
+                f"({len(self.messages)} agent message(s), last one is the result)]"
+            )
             self._settle("done", final)
         elif method == "turn/failed" or (params.get("error") and method and method.startswith("turn/")):
+            self._flush_message()
             err = str(params.get("error") or "turn failed")
             self.turn_id = None
             self.log(f"\n[turn failed: {err}]")
@@ -195,7 +344,7 @@ class JobSession:
                 f"sandbox={self.job.get('sandbox')} fast={bool(self.job.get('fast_mode'))}]"
             )
             self._write_status()
-            full_prompt = NOTIFY_PREAMBLE.format(slug=self.job["slug"], cli=_CLI_PATH) + prompt
+            full_prompt = build_preamble(self.job, _CLI_PATH) + prompt
             r = self.conn.request(
                 "turn/start",
                 {
@@ -263,6 +412,21 @@ class JobSession:
             low = cmd.lower()
             if low.startswith("steer:"):
                 self.steer(cmd[6:].strip())
+            elif low.startswith("ask:"):
+                # ask:<ask_id>:<question> -- steer the question in and capture the reply that
+                # comes back as the next agent message (see _flush_message).
+                rest = cmd[4:]
+                aid, _, question = rest.partition(":")
+                try:
+                    self._pending_ask = int(aid)
+                except ValueError:
+                    self.log(f"\n[ask rejected: bad id {aid!r}]")
+                    continue
+                self.log(f"\n[ASK #{aid} -> {question[:80]}]")
+                self.steer(
+                    "[scheduler question -- answer in your very next message, then carry on "
+                    "exactly where you left off; this is not a change of task] " + question
+                )
             elif low == "interrupt":
                 self.interrupt()
             elif low == "quit":

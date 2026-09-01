@@ -78,12 +78,13 @@ also appears live in the dashboard's output panel. Use it for jobs where you wan
 heads-up, a question, or a checkpoint instead of waiting for the whole turn — no need to explain
 the mechanism yourself, Codex is already told about it.
 
-**Caveat (verified 2026-08-31):** Codex following this instruction is not guaranteed, especially
-at low effort — in testing, `gpt-5.6-luna`/`low` ignored the preamble even when the job's own
-prompt explicitly told it to notify first thing. The delivery mechanism itself is solid (confirmed
-by calling `notify` directly against a running job); getting Codex to *use* it reliably is a
-prompt-engineering problem like any other instruction-following case — higher effort and making it
-part of the job's own explicit task description (not just relying on the preamble alone) help.
+**Correction (2026-09-01):** the earlier note here blamed Codex for ignoring this preamble. That
+was wrong, or at least incomplete. `notify` writes to the scheduler's SQLite DB, which is outside
+the job's sandbox, so from inside a `read-only` or `workspace-write` job the command was *rejected
+by the sandbox* — indistinguishable, from the outside, from Codex declining to call it. Codex was
+often trying and failing. Use the `[[NOTE]]` marker instead (see "Checkpoints" below): it travels
+in the message stream, needs no filesystem access, and works in every sandbox. Instruction-following
+still varies with effort, but that is now the only variable rather than the second of two.
 
 ## Command reference
 
@@ -91,11 +92,15 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 
 | command | purpose |
 |---|---|
-| `submit --session --slug --workspace (--prompt \| --prompt-file) [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority]` | queue one job |
+| `submit --session --slug --workspace (--prompt \| --prompt-file) [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds]` | queue one job |
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
-| `wait --session [--slugs a,b --all] [--follow] [--timeout secs]` | block until a job settles or sends a `notify` message (see above); `--follow` keeps streaming further messages instead of returning after the first batch, still stopping as soon as the job settles |
+| `wait --session [--slugs a,b --all] [--follow] [--timeout secs] [--json]` | block until a job settles or sends a message (see above); `--follow` keeps streaming further messages instead of returning after the first batch, still stopping as soon as the job settles; `--json` emits the machine-readable payload (result, `result_json`, tokens, checkpoint) |
+| `ask <slug> "<question>" [--timeout secs]` | **ask a running job a question and block for its answer** -- request/response, unlike write-only `steer` |
+| `checkpoint <slug> "<text>"` | called *by Codex* to save recoverable progress (prefer the `[[CHECKPOINT]]` marker -- see below) |
+| `watch <slug> [--match REGEX] [--flat-for secs] [--timeout secs] [--since-now]` | block until something worth waking for happens, then exit -- background this instead of polling on a timer |
+| `usage [--json] [--days N]` | live Codex **account** rate limits, plan, credits and token usage (talks to Codex directly; needs no daemon and no job) |
 | `notify <slug> "<text>"` | called *by Codex itself* from inside a running job to message you without ending its turn |
 | `steer <slug> "<text>"` | mid-flight correction into a *running* job |
 | `stop <slug> [--reason "..."]` | interrupt+quit a running job (or delete if still queued); records why in the job's `error` field so `show`/the dashboard can distinguish an intentional stop from an actual failure |
@@ -109,6 +114,133 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 
 `steer`/`stop`/`rm`/`edit`/`reorder` only act on the job's most recent **active** (queued/running)
 row for that slug — a slug can be reused once its earlier job is terminal.
+
+## Getting output you can act on
+
+### `--schema`: make the result machine-readable
+
+Pass a JSON Schema (inline, or a path to a `.json` file) and Codex is told its final message must
+be exactly one JSON value matching it:
+
+```bash
+python3 .../scheduler_cli.py submit --session <id> --slug audit --workspace <repo> \
+  --schema '{"type":"object","required":["findings"],"properties":{"findings":{"type":"array"}}}' \
+  --prompt "Audit X. Return findings as JSON."
+python3 .../scheduler_cli.py wait --session <id> --slugs audit --all --json
+```
+
+The daemon parses the final message (tolerating a ```json fence or surrounding prose), checks it,
+and stores it in `result_json`, which `wait --json` returns as real JSON. On a mismatch the job
+still completes -- `result` keeps the raw text and `schema_error` says what was wrong, so you
+never silently lose the work.
+
+**The check is deliberately shallow: top-level `type` plus `required` keys.** It catches the
+common failures (answered in prose, dropped a field) and nothing subtler. It is not a JSON Schema
+validator, so do not treat a pass as full validation of nested structure.
+
+### `--cite`: make claims checkable
+
+Adds a preamble requiring every factual claim in the result to carry an anchor you can verify
+independently -- `file.py:120-134` for code, URL plus the quoted sentence for a web source, the
+exact command and its output for observed behaviour -- and to mark anything it cannot anchor as
+UNVERIFIED rather than dropping it or dressing it up.
+
+Use it whenever you intend to *act* on the result. Verification is the real bottleneck on
+delegation: a claim you can spot-check in seconds is worth far more than a confident paragraph you
+would have to redo the work to trust.
+
+### `{{deps.<slug>.result}}`: pass work down the graph
+
+Dependencies sequence jobs; interpolation lets them actually *compose*. In any prompt:
+
+- `{{deps.<slug>.result}}` -- that dependency's final result
+- `{{deps.<slug>.result_json}}` -- its validated structured result
+- `{{deps.<slug>.checkpoint}}` -- its last checkpoint
+
+Substitution happens at launch, once the dependency is `done`, so the downstream job sees the real
+text instead of re-deriving it. An unknown slug is left in place verbatim and logged rather than
+silently blanked -- a visible `{{deps...}}` in a prompt is a bug you can see; an empty string is
+not.
+
+## Supervising a job while it runs
+
+### `ask`: a real question, and an answer
+
+```bash
+python3 .../scheduler_cli.py ask my-job "Which file are you on, and what have you ruled out?"
+```
+
+Blocks (default 120s) and prints Codex's reply. The question is steered into the running turn and
+the daemon captures the next agent message as the answer; **Codex keeps working, the turn does not
+end, and the answer is not part of the job's result.** Verified round-trip in testing: ~7s.
+
+This is the tool for "is it on the right track?", because the progress log shows you what a job
+*did* and never what it *concluded*.
+
+### `watch`: get woken only when it matters
+
+```bash
+# (background this) wake on a dangerous command, or on a genuine stall
+python3 .../scheduler_cli.py watch my-job --match "rm -rf|git push" --flat-for 90
+```
+
+Exits on the first of: `--match` hitting new log output, `--flat-for` seconds without the log
+growing (a real stall), the job settling, or `--timeout`. Because Claude Code notifies the session
+when a backgrounded command exits, this replaces polling the log on a timer -- which costs a full
+model invocation per tick, usually just to learn that nothing changed.
+
+**What the log can and cannot tell you:** every shell command is visible (truncated to 200 chars),
+and so is every streamed message. Reasoning is *not* -- it appears only as a bare
+`[item reasoning]` marker, and web searches log neither query nor results. So a job reading the
+wrong repo is obvious within seconds, while a job reasoning its way to a wrong conclusion looks
+identical to one reasoning correctly. A stalled job shows a log that stops growing entirely; a
+thinking job keeps emitting markers at a slow, steady rate. Use `--flat-for`, not marker counts.
+
+### Checkpoints: surviving a stop
+
+Jobs with `--max-seconds`, or at `xhigh`/`ultra` effort, are told to save progress periodically by
+writing a marker into their own message text:
+
+```
+[[CHECKPOINT]] read db.py and daemon.py; state machine mapped; still to do: cli, client
+```
+
+Content runs to the next blank line. The scheduler stores it (replacing the previous checkpoint),
+strips it from the result, and surfaces it automatically when the job is stopped, times out, or
+exceeds its budget -- turning "all work lost" into "here is where it got to". `[[NOTE]] <text>`
+works the same way for an ad-hoc message to you, delivered through `wait` like `notify`.
+
+> **Why markers rather than a CLI call.** `notify`/`checkpoint`/`answer` all write to the
+> scheduler's SQLite DB, which lives outside the job's sandbox. Under `read-only` -- and under
+> `workspace-write` before this was fixed -- those writes are rejected, so the callback fails
+> silently and looks exactly like Codex ignoring the instruction. (This was a real, long-standing
+> bug: `workspace-write` jobs now get the scheduler state dir added as a `writableRoots` entry, but
+> `read-only` has no writable path at all in the protocol.) **The markers need no filesystem access
+> whatsoever, so they work identically in every sandbox** -- prefer them; the CLI forms remain for
+> `danger-full-access` jobs and external callers.
+
+### Budgets and token accounting
+
+`--max-seconds N` stops a job once it has run that long, recording `budget exceeded` as the cause
+and preserving its checkpoint. This is deliberately distinct from the hang timeout: a job can be
+perfectly healthy and still not worth more time.
+
+Every job's cumulative token usage is captured live from the app-server
+(`thread/tokenUsage/updated`) and reported by `wait` and `wait --json`: input, cached, output,
+reasoning, total, and the model's context window.
+
+## Checking the Codex account
+
+```bash
+python3 .../scheduler_cli.py usage          # human-readable
+python3 .../scheduler_cli.py usage --json   # full payload
+```
+
+Shows the plan, each rate-limit bucket with a used-percent bar and when it resets, credit balance,
+available reset credits, and lifetime/daily token usage. It queries Codex directly
+(`account/rateLimits/read`, `account/usage/read`) and deliberately does **not** start the scheduler
+daemon, so it is safe to run at any time -- including before deciding whether to fan out a batch of
+expensive jobs.
 
 ## Job parameters
 
@@ -131,6 +263,7 @@ row for that slug — a slug can be reused once its earlier job is terminal.
   obvious cause, so get the sandbox right up front rather than debugging it after the fact. The
   submit confirmation and `list`/`show` always echo the sandbox actually used, specifically so a
   wrong choice is visible immediately instead of discovered hours later.
+- **schema / cite / max_seconds**: see "Getting output you can act on" above.
 - **No auto-retry**: a failed/hung job is marked `failed` and reported as-is — the scheduler never
   silently resubmits it. Decide whether to `submit` it again yourself after seeing why it failed
   (`show <slug>`).

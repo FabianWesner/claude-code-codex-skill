@@ -12,7 +12,9 @@ never produces two daemons. Not meant to be run by hand — scheduler_cli.py sta
 import calendar
 import datetime
 import fcntl
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -22,6 +24,7 @@ import db
 import appserver_client
 
 TICK_SECONDS = 2.0
+_hooks = {"tokens": None, "ask": None, "checkpoint": None, "message": None}
 CODEX_UPDATE_MARKER = os.path.join(db.STATE_DIR, "last_codex_update_date")
 SUMMARY_INTERVAL_SECONDS = 60
 SUMMARY_TAIL_LINES = 60
@@ -69,6 +72,25 @@ def recover_crashed_jobs(conn):
     conn.commit()
 
 
+def cascade_orphaned_deps(conn):
+    """A queued job whose dependency row points at a job that no longer exists can never become
+    ready (ready_jobs treats a dangling edge as unsatisfied, deliberately). Fail it explicitly so
+    it surfaces through `wait` instead of sitting queued forever."""
+    rows = conn.execute(
+        """SELECT DISTINCT j.id AS id, j.slug AS slug FROM jobs j JOIN job_deps d ON d.job_id = j.id
+           LEFT JOIN jobs dj ON dj.id = d.depends_on_job_id
+           WHERE j.status='queued' AND dj.id IS NULL"""
+    ).fetchall()
+    for r in rows:
+        conn.execute(
+            "UPDATE jobs SET status='failed', error=?, finished_at=? WHERE id=? AND status='queued'",
+            ("a dependency job no longer exists (removed before it ran)", db.now_iso(), r["id"]),
+        )
+        log(f"orphaned deps: job #{r['id']} ({r['slug']}) marked failed")
+    if rows:
+        conn.commit()
+
+
 def cascade_failed_deps(conn):
     while True:
         rows = conn.execute(
@@ -104,15 +126,113 @@ def reap_dead_processes(conn, state):
         state.remove(job_id)
 
 
+def _extract_json(text):
+    """Pull one JSON value out of a final message, tolerating a ```json fence or stray prose."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        body = t.split("\n", 1)[1] if "\n" in t else ""
+        t = body.rsplit("```", 1)[0].strip() if "```" in body else body.strip()
+    try:
+        return json.loads(t), None
+    except Exception:
+        pass
+    for opener, closer in (("{", "}"), ("[", "]")):
+        i, j = t.find(opener), t.rfind(closer)
+        if i != -1 and j > i:
+            try:
+                return json.loads(t[i:j + 1]), None
+            except Exception:
+                continue
+    return None, "final message was not valid JSON"
+
+
+def _check_schema(value, schema):
+    """Deliberately shallow: top-level type and `required` keys only. This is a smoke test that
+    catches the common failure (Codex answered in prose, or dropped a field), NOT a JSON Schema
+    validator -- it does not walk nested definitions, and it is documented as such so nobody
+    mistakes a pass for full validation."""
+    try:
+        sch = json.loads(schema) if isinstance(schema, str) else schema
+    except Exception:
+        return None
+    want = sch.get("type")
+    if want == "object" and not isinstance(value, dict):
+        return f"expected a JSON object, got {type(value).__name__}"
+    if want == "array" and not isinstance(value, list):
+        return f"expected a JSON array, got {type(value).__name__}"
+    if isinstance(value, dict):
+        missing = [k for k in (sch.get("required") or []) if k not in value]
+        if missing:
+            return f"missing required field(s): {', '.join(missing)}"
+    return None
+
+
+def make_on_tokens():
+    def on_tokens(job, usage):
+        conn = db.connect()
+        try:
+            db.record_tokens(conn, job["id"], usage)
+        finally:
+            conn.close()
+
+    return on_tokens
+
+
+def make_on_checkpoint():
+    def on_checkpoint(job, text):
+        conn = db.connect()
+        try:
+            db.set_checkpoint(conn, job["id"], text)
+        finally:
+            conn.close()
+
+    return on_checkpoint
+
+
+def make_on_message():
+    def on_message(job, text):
+        conn = db.connect()
+        try:
+            conn.execute("INSERT INTO job_messages (job_id, text) VALUES (?, ?)", (job["id"], text))
+            conn.commit()
+        finally:
+            conn.close()
+        log(f"job #{job['id']} ({job['slug']}) sent a message via marker")
+
+    return on_message
+
+
+def make_on_ask_answer():
+    def on_ask_answer(job, ask_id, text):
+        conn = db.connect()
+        try:
+            db.answer_ask(conn, ask_id, text)
+        finally:
+            conn.close()
+        log(f"job #{job['id']} ({job['slug']}) answered ask #{ask_id}")
+
+    return on_ask_answer
+
+
 def make_on_done(state):
     def on_done(job, status, text):
         conn = db.connect()
         try:
             if status == "done":
+                result_json, schema_error = None, None
+                if job.get("result_schema"):
+                    parsed, schema_error = _extract_json(text)
+                    if schema_error is None:
+                        schema_error = _check_schema(parsed, job["result_schema"])
+                    if schema_error is None:
+                        result_json = json.dumps(parsed)
                 conn.execute(
-                    "UPDATE jobs SET status='done', result=?, finished_at=? WHERE id=? AND status='running'",
-                    (text, db.now_iso(), job["id"]),
+                    """UPDATE jobs SET status='done', result=?, result_json=?, schema_error=?,
+                                        finished_at=? WHERE id=? AND status='running'""",
+                    (text, result_json, schema_error, db.now_iso(), job["id"]),
                 )
+                if schema_error:
+                    log(f"job #{job['id']} ({job['slug']}) schema mismatch: {schema_error}")
             else:
                 conn.execute(
                     "UPDATE jobs SET status='failed', error=?, finished_at=? WHERE id=? AND status='running'",
@@ -129,20 +249,64 @@ def make_on_done(state):
     return on_done
 
 
+DEPS_UNSATISFIED_SQL = """
+    SELECT 1 FROM job_deps d LEFT JOIN jobs dj ON dj.id = d.depends_on_job_id
+    WHERE d.job_id = ? AND (dj.id IS NULL OR dj.status != 'done')
+"""
+
+
+def deps_satisfied(conn, job_id):
+    return conn.execute(DEPS_UNSATISFIED_SQL, (job_id,)).fetchone() is None
+
+
 def ready_jobs(conn):
+    """Audit finding #2: this used to INNER JOIN job_deps to jobs, so a dependency row pointing at
+    a deleted job matched nothing and the dependent looked ready -- launching without its
+    dependency. The LEFT JOIN + `dj.id IS NULL` makes a dangling edge BLOCK the job instead, which
+    is the safe direction: it stays queued and visible rather than silently running early."""
     rows = conn.execute(
         """SELECT j.* FROM jobs j
            WHERE j.status = 'queued'
              AND NOT EXISTS (
-               SELECT 1 FROM job_deps d JOIN jobs dj ON dj.id = d.depends_on_job_id
-               WHERE d.job_id = j.id AND dj.status != 'done'
+               SELECT 1 FROM job_deps d LEFT JOIN jobs dj ON dj.id = d.depends_on_job_id
+               WHERE d.job_id = j.id AND (dj.id IS NULL OR dj.status != 'done')
              )
            ORDER BY j.priority ASC, j.id ASC"""
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def launch_ready_jobs(conn, state, on_done):
+DEP_REF_RE = re.compile(r"\{\{deps\.([A-Za-z0-9_-]+)\.(result|result_json|checkpoint)\}\}")
+
+
+def interpolate_deps(conn, job):
+    """Substitute {{deps.<slug>.result}} / .result_json / .checkpoint in a prompt with the
+    upstream job's actual output, so a DAG can pass work downstream instead of only sequencing it.
+
+    Unknown slugs are left untouched (and logged) rather than silently blanked -- a prompt that
+    still contains a literal {{deps...}} marker is a visible bug; an empty string is not."""
+    prompt = job["prompt"]
+    if "{{deps." not in prompt:
+        return prompt, []
+    available = db.dep_results(conn, job["id"])
+    missing = []
+
+    def sub(m):
+        slug, field = m.group(1), m.group(2)
+        dep = available.get(slug)
+        if dep is None:
+            missing.append(f"{slug}.{field} (not a dependency of this job)")
+            return m.group(0)
+        val = dep.get(field)
+        if val is None or val == "":
+            missing.append(f"{slug}.{field} (empty)")
+            return f"({slug}.{field} was empty)"
+        return val
+
+    return DEP_REF_RE.sub(sub, prompt), missing
+
+
+def launch_ready_jobs(conn, state, on_done, on_tokens=None, on_ask_answer=None):
     cfg = db.get_config(conn)
     running_count = conn.execute("SELECT COUNT(*) c FROM jobs WHERE status='running'").fetchone()["c"]
     for job in ready_jobs(conn):
@@ -155,15 +319,91 @@ def launch_ready_jobs(conn, state, on_done):
         conn.commit()
         if not updated:
             continue  # raced with something else; skip, will be picked up next tick if still queued
-        js = appserver_client.JobSession(job, on_done)
+
+        # Audit finding #4: ready_jobs() was a snapshot -- a concurrent `edit --deps` could add an
+        # unmet dependency between that read and this row becoming 'running'. Re-check now that we
+        # own the row, and hand it back if the answer changed.
+        if not deps_satisfied(conn, job["id"]):
+            conn.execute(
+                "UPDATE jobs SET status='queued', started_at=NULL WHERE id=? AND status='running'",
+                (job["id"],),
+            )
+            conn.commit()
+            log(f"job #{job['id']} ({job['slug']}) deps changed during launch; returned to queued")
+            continue
+
+        prompt, missing = interpolate_deps(conn, job)
+        if missing:
+            log(f"job #{job['id']} ({job['slug']}) unresolved dep refs: {missing}")
+
+        # Audit finding #1: the row is already 'running' at this point. If JobSession construction
+        # throws (codex missing, fork failure, bad job dir), the old code let the exception escape
+        # to the tick handler, which logged and moved on -- leaving a 'running' row with no session
+        # that reaping and hang detection could never see, stuck until a daemon restart. Failing it
+        # here keeps the no-auto-retry contract while making the failure visible via `wait`.
+        try:
+            js = appserver_client.JobSession(
+                job, on_done, on_tokens=on_tokens, on_ask_answer=on_ask_answer,
+                on_checkpoint=_hooks["checkpoint"], on_message=_hooks["message"],
+            )
+        except Exception as e:  # noqa
+            conn.execute(
+                "UPDATE jobs SET status='failed', error=?, finished_at=? WHERE id=? AND status='running'",
+                (f"failed to start codex app-server: {e}", db.now_iso(), job["id"]),
+            )
+            conn.commit()
+            log(f"job #{job['id']} ({job['slug']}) failed to launch: {e}")
+            continue
+
         state.add(job["id"], js)
         conn.execute(
             "UPDATE jobs SET session_dir=?, pid=? WHERE id=?", (js.dir, js.pid, job["id"])
         )
         conn.commit()
         log(f"launched job #{job['id']} ({job['slug']}) pid={js.pid}")
-        threading.Thread(target=js.start_turn, args=(job["prompt"],), daemon=True).start()
+        threading.Thread(target=js.start_turn, args=(prompt,), daemon=True).start()
         running_count += 1
+
+
+def sync_thread_ids(conn, state):
+    """JobSession learns its Codex thread id asynchronously in start_turn; copy it into the DB
+    once available so `show`/the dashboard can correlate a job with a Codex thread."""
+    for job_id, js in state.items():
+        if not js.thread:
+            continue
+        conn.execute(
+            "UPDATE jobs SET thread_id=? WHERE id=? AND (thread_id IS NULL OR thread_id='')",
+            (js.thread, job_id),
+        )
+    conn.commit()
+
+
+def check_budgets(conn, state):
+    """Enforce per-job --max-seconds. Distinct from the hang timeout: a job can be perfectly
+    healthy and still be over budget, so this stops it deliberately (status 'stopped', with the
+    cause spelled out) rather than reporting it as a failure."""
+    now = time.time()
+    for job_id, js in state.items():
+        row = conn.execute(
+            "SELECT max_seconds, started_at, slug FROM jobs WHERE id=? AND status='running'", (job_id,)
+        ).fetchone()
+        if not row or not row["max_seconds"]:
+            continue
+        started = _parse_iso_epoch(row["started_at"])
+        if not started or now - started <= row["max_seconds"]:
+            continue
+        elapsed = int(now - started)
+        updated = conn.execute(
+            "UPDATE jobs SET status='stopped', error=?, finished_at=? WHERE id=? AND status='running'",
+            (f"budget exceeded: ran {elapsed}s, limit was {row['max_seconds']}s "
+             f"(any checkpoint it saved is preserved)", db.now_iso(), job_id),
+        ).rowcount
+        conn.commit()
+        if updated:
+            log(f"budget exceeded: job #{job_id} ({row['slug']}) stopped after {elapsed}s")
+            js2 = state.remove(job_id)
+            if js2:
+                threading.Thread(target=js2.quit, daemon=True).start()
 
 
 def check_hangs(conn, state):
@@ -341,10 +581,14 @@ def tick(state, on_done):
     try:
         reap_dead_processes(conn, state)
         cascade_failed_deps(conn)
+        cascade_orphaned_deps(conn)
         ensure_codex_updated_today()
         draining = os.path.exists(db.DRAIN_MARKER)
         if not codex_update_due_today() and not draining:
-            launch_ready_jobs(conn, state, on_done)
+            launch_ready_jobs(conn, state, on_done,
+                              on_tokens=_hooks["tokens"], on_ask_answer=_hooks["ask"])
+        sync_thread_ids(conn, state)
+        check_budgets(conn, state)
         check_hangs(conn, state)
         maybe_summarize(conn, state)
     finally:
@@ -367,6 +611,10 @@ def main():
 
     state = State()
     on_done = make_on_done(state)
+    _hooks["tokens"] = make_on_tokens()
+    _hooks["ask"] = make_on_ask_answer()
+    _hooks["checkpoint"] = make_on_checkpoint()
+    _hooks["message"] = make_on_message()
     conn = db.connect()
     try:
         recover_crashed_jobs(conn)

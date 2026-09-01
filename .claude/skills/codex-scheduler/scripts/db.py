@@ -44,7 +44,21 @@ CREATE TABLE IF NOT EXISTS jobs (
   started_at TEXT,
   finished_at TEXT,
   working_on TEXT,
-  working_on_updated_at TEXT
+  working_on_updated_at TEXT,
+  thread_id TEXT,
+  result_schema TEXT,
+  result_json TEXT,
+  schema_error TEXT,
+  cite_mode INTEGER NOT NULL DEFAULT 0,
+  max_seconds INTEGER,
+  checkpoint TEXT,
+  checkpoint_at TEXT,
+  tokens_input INTEGER,
+  tokens_cached INTEGER,
+  tokens_output INTEGER,
+  tokens_reasoning INTEGER,
+  tokens_total INTEGER,
+  context_window INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_slug ON jobs(slug) WHERE status IN ('queued','running');
 CREATE INDEX IF NOT EXISTS jobs_session ON jobs(claude_session_id);
@@ -64,6 +78,16 @@ CREATE TABLE IF NOT EXISTS job_messages (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS job_messages_job ON job_messages(job_id);
+
+CREATE TABLE IF NOT EXISTS job_asks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id),
+  question TEXT NOT NULL,
+  answer TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  answered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS job_asks_job ON job_asks(job_id);
 
 CREATE TABLE IF NOT EXISTS job_working_on_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,14 +120,36 @@ def ensure_state_dirs():
 _ADDED_COLUMNS = [
     ("jobs", "working_on", "TEXT"),
     ("jobs", "working_on_updated_at", "TEXT"),
+    ("jobs", "thread_id", "TEXT"),
+    ("jobs", "result_schema", "TEXT"),
+    ("jobs", "result_json", "TEXT"),
+    ("jobs", "schema_error", "TEXT"),
+    ("jobs", "cite_mode", "INTEGER NOT NULL DEFAULT 0"),
+    ("jobs", "max_seconds", "INTEGER"),
+    ("jobs", "checkpoint", "TEXT"),
+    ("jobs", "checkpoint_at", "TEXT"),
+    ("jobs", "tokens_input", "INTEGER"),
+    ("jobs", "tokens_cached", "INTEGER"),
+    ("jobs", "tokens_output", "INTEGER"),
+    ("jobs", "tokens_reasoning", "INTEGER"),
+    ("jobs", "tokens_total", "INTEGER"),
+    ("jobs", "context_window", "INTEGER"),
 ]
 
 
 def _migrate(conn):
+    """Additive column migration. Two processes can race here (audit finding #11): both see the
+    column missing and both ALTER. The loser gets "duplicate column name", which is benign --
+    the column exists either way, so swallow exactly that error and keep going."""
     for table, col, coltype in _ADDED_COLUMNS:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if col not in cols:
+        if col in cols:
+            continue
+        try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
     conn.commit()
 
 
@@ -128,10 +174,20 @@ def get_config(conn):
     return dict(row)
 
 
+class ConfigError(ValueError):
+    pass
+
+
 def set_config(conn, parallel_limit=None, hang_timeout_minutes=None):
+    """Range-checked (audit finding #10): parallel_limit < 1 starves every job forever, and
+    hang_timeout_minutes < 1 fails running jobs on the next tick."""
     if parallel_limit is not None:
+        if parallel_limit < 1:
+            raise ConfigError("parallel must be >= 1 (0 or negative would starve every job)")
         conn.execute("UPDATE config SET parallel_limit=? WHERE id=1", (parallel_limit,))
     if hang_timeout_minutes is not None:
+        if hang_timeout_minutes < 1:
+            raise ConfigError("hang-timeout must be >= 1 minute (0 or negative fails running jobs immediately)")
         conn.execute("UPDATE config SET hang_timeout_minutes=? WHERE id=1", (hang_timeout_minutes,))
     conn.commit()
 
@@ -175,13 +231,74 @@ def job_dir(job_id, slug):
     return os.path.join(JOBS_DIR, f"{job_id}-{slug}")
 
 
+def delete_job_and_deps(conn, job_id):
+    """Delete a job row along with dependency edges in BOTH directions.
+
+    Audit finding #2: only outgoing edges (job_deps.job_id = me) used to be cleaned up. Incoming
+    edges (job_deps.depends_on_job_id = me) survived as dangling rows, and because ready_jobs()
+    joined job_deps to jobs, a dangling row matched nothing and the dependent silently became
+    "ready" -- launching without the dependency it was supposed to wait for. Foreign keys are not
+    enforced (PRAGMA foreign_keys defaults off and enabling it now would fail on pre-existing
+    dangling rows), so integrity is maintained here in application code instead.
+
+    Returns the number of job rows actually deleted, so callers can tell a real delete from a
+    lost race."""
+    conn.execute("DELETE FROM job_deps WHERE job_id=? OR depends_on_job_id=?", (job_id, job_id))
+    n = conn.execute("DELETE FROM jobs WHERE id=? AND status='queued'", (job_id,)).rowcount
+    return n
+
+
+def queued_dependents(conn, job_id):
+    rows = conn.execute(
+        """SELECT j.id AS id, j.slug AS slug FROM job_deps d JOIN jobs j ON j.id = d.job_id
+           WHERE d.depends_on_job_id=? AND j.status='queued'""",
+        (job_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fail_queued_dependents(conn, job_id, cause):
+    """Deleting a queued job leaves its dependents with nothing to wait for. Removing their edge
+    would let them launch immediately -- which is exactly the bug audit finding #2 describes, just
+    reached a different way. They are failed instead, transitively, matching how the daemon
+    already cascades a genuinely failed dependency. Returns the slugs it failed."""
+    failed = []
+    frontier = [job_id]
+    seen = {job_id}
+    while frontier:
+        nxt = []
+        for jid in frontier:
+            for dep in queued_dependents(conn, jid):
+                if dep["id"] in seen:
+                    continue
+                seen.add(dep["id"])
+                conn.execute(
+                    "UPDATE jobs SET status='failed', error=?, finished_at=? WHERE id=? AND status='queued'",
+                    (cause, now_iso(), dep["id"]),
+                )
+                failed.append(dep["slug"])
+                nxt.append(dep["id"])
+        frontier = nxt
+    conn.commit()
+    return failed
+
+
 def stop_job(conn, job, cause):
     """Shared by scheduler_cli.py's `stop` and the dashboard's cancel button, so both go through
     identical logic. Deletes a still-queued job outright; interrupt+quits a running one and
-    records `cause` in its error field (surfaced to the owning session via the next `wait`)."""
+    records `cause` in its error field (surfaced to the owning session via the next `wait`).
+
+    Returns "removed" / "stopped" only when a row actually changed; None when the daemon won the
+    race (audit finding #6 -- this used to report success unconditionally)."""
     if job["status"] == "queued":
-        conn.execute("DELETE FROM jobs WHERE id=? AND status='queued'", (job["id"],))
+        dependents = fail_queued_dependents(
+            conn, job["id"], f"dependency '{job['slug']}' was removed before it ran"
+        )
+        n = delete_job_and_deps(conn, job["id"])
         conn.commit()
+        if not n:
+            return None
+        stop_job.last_cascaded = dependents
         return "removed"
     updated = conn.execute(
         "UPDATE jobs SET status='stopped', error=?, finished_at=? WHERE id=? AND status='running'",
@@ -195,6 +312,59 @@ def stop_job(conn, job, cause):
         except OSError:
             pass
     return "stopped" if updated else None
+
+
+def record_tokens(conn, job_id, usage):
+    """Persist a thread/tokenUsage/updated snapshot (cumulative `total` for the thread)."""
+    tot = (usage or {}).get("total") or {}
+    conn.execute(
+        """UPDATE jobs SET tokens_input=?, tokens_cached=?, tokens_output=?,
+                            tokens_reasoning=?, tokens_total=?, context_window=?
+           WHERE id=?""",
+        (
+            tot.get("inputTokens"), tot.get("cachedInputTokens"), tot.get("outputTokens"),
+            tot.get("reasoningOutputTokens"), tot.get("totalTokens"),
+            (usage or {}).get("modelContextWindow"), job_id,
+        ),
+    )
+    conn.commit()
+
+
+def set_checkpoint(conn, job_id, text):
+    conn.execute(
+        "UPDATE jobs SET checkpoint=?, checkpoint_at=? WHERE id=?", (text, now_iso(), job_id)
+    )
+    conn.commit()
+
+
+def add_ask(conn, job_id, question):
+    cur = conn.execute("INSERT INTO job_asks (job_id, question) VALUES (?, ?)", (job_id, question))
+    conn.commit()
+    return cur.lastrowid
+
+
+def answer_ask(conn, ask_id, answer):
+    conn.execute(
+        "UPDATE job_asks SET answer=?, answered_at=? WHERE id=? AND answer IS NULL",
+        (answer, now_iso(), ask_id),
+    )
+    conn.commit()
+
+
+def get_ask(conn, ask_id):
+    row = conn.execute("SELECT * FROM job_asks WHERE id=?", (ask_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def dep_results(conn, job_id):
+    """{slug: job-row} for every dependency of job_id -- used to interpolate upstream results
+    into a dependent's prompt at launch time."""
+    rows = conn.execute(
+        """SELECT j.* FROM job_deps d JOIN jobs j ON j.id = d.depends_on_job_id
+           WHERE d.job_id=?""",
+        (job_id,),
+    ).fetchall()
+    return {r["slug"]: dict(r) for r in rows}
 
 
 def list_jobs(conn, session_id=None, status=None):
