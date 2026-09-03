@@ -17,10 +17,10 @@ retries a failed job.
 
 ## The core loop: submit, then get notified — don't poll
 
-**Always submit, then launch `wait` via the Bash tool with `run_in_background: true`.** That's
-what makes this different from raw `codex exec`/`codex_session.py`: Claude Code natively delivers
-a `<task-notification>` to the session that started a backgrounded Bash command when it exits.
-`wait` blocks on the shared DB until one of your jobs finishes, then exits — so you get told,
+**Always submit, then launch `wait --drain` via the Bash tool with `run_in_background: true`.**
+That's what makes this different from raw `codex exec`/`codex_session.py`: Claude Code natively
+delivers a `<task-notification>` to the session that started a backgrounded Bash command when it
+exits. `wait` blocks on the shared DB until your jobs finish, then exits — so you get told,
 unprompted, the moment Codex is done or breaks, instead of having to remember to check.
 
 ```bash
@@ -29,8 +29,39 @@ python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py submit \
   --prompt "Fix the lint errors in src/" --effort xhigh
 
 # THEN, via Bash with run_in_background: true:
-python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py wait --session <this-claude-session-id>
+python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py wait \
+  --session <this-claude-session-id> --drain
 ```
+
+### Nothing can arm the watcher for you — so `submit` tells you whether one is armed
+
+A `<task-notification>` is produced *only* when a Bash command **you** backgrounded exits. The
+scheduler cannot self-arm that from inside the daemon, which makes "forgot to arm a watcher" a
+silent failure: jobs run, finish, write their results to the DB, and nobody is ever told. This has
+bitten real sessions — six jobs once sat finished and unreported because a dispatch went out with
+no watcher behind it.
+
+So every `submit`/`submit-batch` now prints your notification status:
+
+```
+  watcher: armed for this session
+  watcher: NONE ARMED -- you will NOT be notified when this finishes.
+           Background this via the Bash tool with run_in_background: true:
+             python3 .../scheduler_cli.py wait --session <id> --drain
+```
+
+If you see `NONE ARMED`, arm one before you walk away.
+
+### Use `--drain`, not a re-arm treadmill
+
+Plain `wait` returns as soon as **one** job settles — `--follow` only changes how *messages* are
+streamed, not that. Dispatch five jobs and you must re-arm five times, and every gap between them
+is a window where a finishing job notifies nobody. That is precisely how sessions lose results.
+
+`--drain` reports each job as it settles and keeps going, exiting only once the session has had
+nothing queued or running for `--idle-grace` seconds (default 30). One watcher covers an entire
+dispatch, including jobs submitted *after* it was armed — the grace period exists because an early
+job often settles in the gap before the next submit lands, and exiting there would strand the rest.
 
 You'll get a `<task-notification>` with `wait`'s stdout: the job's slug, final status, and its
 result text (or error). If your session ends/restarts before that happens,
@@ -62,6 +93,10 @@ python3 .../scheduler_cli.py wait --session <id> --slugs gen-a,gen-b,merge --all
 `merge` only starts once both `gen-a` and `gen-b` are `done`. If a dependency fails, its
 dependents are automatically marked `failed` too (never retried, never left stuck queued) — check
 `show <slug>` for the `error` field explaining why.
+
+For a batch, prefer one `wait --drain` over `--slugs ... --all`: `--all` reports the set in a
+single burst only once every slug is terminal, whereas `--drain` reports each job the moment it
+lands and still covers anything you add later.
 
 ## Codex can message you back mid-run
 
@@ -100,6 +135,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 | `ask <slug> "<question>" [--timeout secs]` | **ask a running job a question and block for its answer** -- request/response, unlike write-only `steer` |
 | `checkpoint <slug> "<text>"` | called *by Codex* to save recoverable progress (prefer the `[[CHECKPOINT]]` marker -- see below) |
 | `watch <slug> [--match REGEX] [--flat-for secs] [--timeout secs] [--since-now]` | block until something worth waking for happens, then exit -- background this instead of polling on a timer |
+| `wait --session --drain [--idle-grace secs] [--slugs a,b] [--json]` | **the recommended watcher**: report every job as it settles and keep waiting; exit only after the session is quiet for `--idle-grace` seconds (default 30). Covers a whole dispatch with one backgrounded command |
 | `usage [--json] [--days N]` | live Codex **account** rate limits, plan, credits and token usage (talks to Codex directly; needs no daemon and no job) |
 | `notify <slug> "<text>"` | called *by Codex itself* from inside a running job to message you without ending its turn |
 | `steer <slug> "<text>"` | mid-flight correction into a *running* job |

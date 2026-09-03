@@ -120,6 +120,39 @@ def cmd_daemon(args):
 
 # ---------------------------------------------------------------- validation / helpers
 
+def watcher_armed(session_id):
+    """Is a `wait` process already running for this session?
+
+    The notification is delivered by Claude Code when a BACKGROUNDED Bash command exits, so the
+    only thing that can wake a session is a `wait` the agent itself launched with
+    run_in_background. Nothing in the scheduler can self-arm that, which makes "forgot to arm a
+    watcher" a silent failure: jobs finish, results sit in the DB, and nobody is told. Submit
+    reports the status every time so the omission is visible at the moment it is made."""
+    try:
+        # -ww is required: without it macOS ps truncates each line (roughly to terminal width),
+        # which silently cuts off the --session argument and makes every watcher look absent.
+        out = subprocess.run(["ps", "-Awwo", "args="], capture_output=True, text=True, timeout=10).stdout
+    except Exception:  # noqa - never let a cosmetic check break submit
+        return None  # unknown
+    for line in out.splitlines():
+        if "scheduler_cli.py" in line and " wait" in line and session_id in line:
+            return True
+    return False
+
+
+def report_watcher_status(session_id):
+    armed = watcher_armed(session_id)
+    if armed:
+        print("  watcher: armed for this session", file=sys.stderr)
+    elif armed is False:
+        print(
+            "  watcher: NONE ARMED -- you will NOT be notified when this finishes.\n"
+            "           Background this via the Bash tool with run_in_background: true:\n"
+            f"             python3 {os.path.abspath(__file__)} wait --session {session_id} --drain",
+            file=sys.stderr,
+        )
+
+
 def validate_slug(slug):
     if not slug or not SLUG_RE.match(slug):
         err(f"invalid slug '{slug}': only letters, digits, '-', '_' allowed")
@@ -284,6 +317,7 @@ def cmd_submit(args):
     if spec.get("max_seconds"):
         extras.append(f"budget={spec['max_seconds']}s")
     print(f"submitted job #{job_id} ({spec['slug']}) [{', '.join(extras)}]")
+    report_watcher_status(args.session)
 
 
 def cmd_submit_batch(args):
@@ -341,6 +375,7 @@ def cmd_submit_batch(args):
         conn.close()
     for spec in specs:
         print(f"submitted job #{batch_map[spec['slug']]} ({spec['slug']}) [sandbox={spec['sandbox']}]")
+    report_watcher_status(args.session)
 
 
 # ---------------------------------------------------------------- list / show
@@ -409,6 +444,8 @@ def cmd_wait(args):
     # Per-process message dedup. `notified` is a single global flag, so with several waiters
     # interested in the same job it cannot also serve as this process's "already printed" record.
     seen_msgs = set()
+    reported = set()   # --drain: job ids already handed to the caller
+    idle_since = None  # --drain: when this session first went quiet
     while True:
         conn = db.connect()
         try:
@@ -439,6 +476,7 @@ def cmd_wait(args):
                     print(f"--- message from job #{r['job_id']} ({r['slug']}) at {r['created_at']} ---")
                     print(r["text"])
                     print()
+                sys.stdout.flush()   # same reason as in the drain branch: stay tailable
                 if not args.follow:
                     return
                 # --follow: keep the connection loop going -- fall through to the terminal-status
@@ -458,6 +496,54 @@ def cmd_wait(args):
             else:
                 q += " AND notified=0"
             rows = [dict(r) for r in conn.execute(q, args_l).fetchall()]
+
+            if args.drain:
+                # Stay alive across MULTIPLE settles and exit only once this session has no
+                # queued or running work left. Plain `wait` (with or without --follow) returns on
+                # the first job that settles, so dispatching N jobs means re-arming N times -- and
+                # every gap between them is a window where a finishing job notifies nobody. One
+                # --drain watcher covers an entire batch.
+                fresh = [r for r in rows if r["id"] not in reported]
+                if fresh:
+                    ids = [r["id"] for r in fresh]
+                    conn.execute(
+                        f"UPDATE jobs SET notified=1 WHERE id IN ({','.join('?' * len(ids))})", ids)
+                    conn.commit()
+                    reported.update(ids)
+                    for r in sorted(fresh, key=lambda x: x["finished_at"] or ""):
+                        _print_result(r, as_json=args.json)
+                    # A drain can run for hours. Python block-buffers stdout when it is a pipe or
+                    # file, so without this the caller reading the backgrounded command's output
+                    # file mid-run sees an empty file until the process exits -- which defeats the
+                    # point of reporting each job as it lands.
+                    sys.stdout.flush()
+                aq = "SELECT COUNT(*) c FROM jobs WHERE claude_session_id=? AND status IN ('queued','running')"
+                aargs = [args.session]
+                if slugs:
+                    aq += f" AND slug IN ({','.join('?' * len(slugs))})"
+                    aargs += slugs
+                active = conn.execute(aq, aargs).fetchone()["c"]
+                conn.close()
+                if active:
+                    idle_since = None
+                else:
+                    # Do NOT exit the instant the session looks idle. A dispatch is usually a
+                    # sequence of submits, and an early job can settle in the gap before the next
+                    # one is queued -- exiting there would leave the rest of the dispatch
+                    # unwatched, which is the exact failure this mode exists to prevent. Require
+                    # the quiet to persist.
+                    if idle_since is None:
+                        idle_since = time.time()
+                    if time.time() - idle_since >= args.idle_grace:
+                        print(f"=== drain complete: {len(reported)} job(s) reported, "
+                              f"session quiet for {args.idle_grace:.0f}s ===")
+                        return
+                if args.timeout and time.time() - start > args.timeout:
+                    err(f"drain timed out with {active} job(s) still active "
+                        f"({len(reported)} reported)")
+                time.sleep(1)
+                continue
+
             if rows:
                 if slugs and args.all:
                     for r in rows:
@@ -1072,6 +1158,14 @@ def build_parser():
                          "still returns as soon as a matching job reaches a terminal status")
     s.add_argument("--json", action="store_true",
                     help="emit the settled job(s) as JSON (result, result_json, tokens, checkpoint)")
+    s.add_argument("--idle-grace", type=float, default=30, dest="idle_grace",
+                    help="for --drain: how many seconds the session must stay quiet (nothing "
+                         "queued or running) before the watcher exits. Guards the gap between "
+                         "consecutive submits. 0 exits on the first idle tick.")
+    s.add_argument("--drain", action="store_true",
+                    help="report every job as it settles and keep waiting; exit only when this "
+                         "session has nothing queued or running. One watcher covers a whole "
+                         "dispatch instead of re-arming after each job.")
     s.set_defaults(func=cmd_wait)
 
     s = sub.add_parser("ask", help="ask a running job a question and block for its answer")
