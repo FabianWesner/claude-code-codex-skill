@@ -35,8 +35,15 @@ SANDBOX_MAP = {
 # under read-only, workspace-write and danger-full-access.
 # A marker's content runs to the next blank line, the next marker, or the end of the message --
 # bounded rather than greedy, so ordinary prose written after a marker is not swallowed into it.
+#
+# The marker must START a line (leading whitespace allowed). Without that anchor, a job whose
+# output merely *mentions* the syntax -- "write a line starting with the `[[NOTE]]` marker" --
+# had that mention parsed as a real message and cut out of its own result. Observed live on a job
+# documenting this scheduler. Anchoring matches what the preamble actually instructs Codex to do
+# and leaves inline references alone.
 SENTINEL_RE = re.compile(
-    r"\[\[(CHECKPOINT|NOTE)\]\](.*?)(?=\n\s*\n|\[\[(?:CHECKPOINT|NOTE)\]\]|\Z)", re.S
+    r"^[ \t]*\[\[(CHECKPOINT|NOTE)\]\](.*?)(?=\n\s*\n|^[ \t]*\[\[(?:CHECKPOINT|NOTE)\]\]|\Z)",
+    re.S | re.M,
 )
 
 _CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_cli.py")

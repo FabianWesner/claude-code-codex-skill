@@ -241,10 +241,16 @@ writing a marker into their own message text:
 [[CHECKPOINT]] read db.py and daemon.py; state machine mapped; still to do: cli, client
 ```
 
-Content runs to the next blank line. The scheduler stores it (replacing the previous checkpoint),
-strips it from the result, and surfaces it automatically when the job is stopped, times out, or
-exceeds its budget -- turning "all work lost" into "here is where it got to". `[[NOTE]] <text>`
-works the same way for an ad-hoc message to you, delivered through `wait` like `notify`.
+The marker must **start a line** (leading whitespace is fine) and its content runs to the next
+blank line. The scheduler stores it (replacing the previous checkpoint), strips it from the result,
+and surfaces it automatically when the job is stopped, times out, or exceeds its budget -- turning
+"all work lost" into "here is where it got to". `[[NOTE]] <text>` works the same way for an ad-hoc
+message to you, delivered through `wait` like `notify`.
+
+The line anchor matters: a job that merely *mentions* the syntax mid-sentence -- "write a line
+starting with the `[[NOTE]]` marker" -- keeps that text in its result instead of having it parsed
+as a real message and cut out. (A marker starting a line inside a fenced code block is still
+treated as real; that case is rare enough to live with.)
 
 > **Why markers rather than a CLI call.** `notify`/`checkpoint`/`answer` all write to the
 > scheduler's SQLite DB, which lives outside the job's sandbox. Under `read-only` -- and under

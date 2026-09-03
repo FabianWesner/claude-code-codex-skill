@@ -477,10 +477,18 @@ def cmd_wait(args):
                     print(r["text"])
                     print()
                 sys.stdout.flush()   # same reason as in the drain branch: stay tailable
-                if not args.follow:
+                if not args.follow and not args.drain:
                     return
-                # --follow: keep the connection loop going -- fall through to the terminal-status
-                # check below so a job settling right after a message still ends the wait.
+                # --follow / --drain: keep the connection loop going -- fall through to the
+                # terminal-status check below so a job settling right after a message still ends
+                # the wait.
+                #
+                # --drain MUST be listed here. Without it, any pending message (a `notify`, or a
+                # [[NOTE]] marker) made drain print that message and return immediately -- while
+                # jobs were still running -- so the dispatch went unwatched and the session was
+                # left with `submit` having truthfully reported "watcher: armed" for a watcher
+                # that had already exited. A drain ends when the session goes quiet, never
+                # because someone said something.
 
             # The `notified` flag means "this session has been told about it at least once". It is
             # the right filter for a catch-all wait, but NOT when specific slugs were requested:
