@@ -127,7 +127,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 
 | command | purpose |
 |---|---|
-| `submit --session --slug --workspace (--prompt \| --prompt-file) [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds]` | queue one job |
+| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds]` | queue one job |
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
@@ -283,6 +283,49 @@ available reset credits, and lifetime/daily token usage. It queries Codex direct
 (`account/rateLimits/read`, `account/usage/read`) and deliberately does **not** start the scheduler
 daemon, so it is safe to run at any time -- including before deciding whether to fan out a batch of
 expensive jobs.
+
+## Choosing the engine: Codex or Cursor
+
+Every job runs under one of two agent CLIs, selected with `--engine` (default `codex`). Both are
+driven through the same scheduler: dependencies, `--drain`, budgets, checkpoints, markers,
+structured output and token accounting all work identically, and a batch can mix them freely --
+including passing a Codex job's result into a Cursor job with `{{deps.<slug>.result}}`.
+
+```bash
+# Cursor with Composer (no reasoning levels -- one tier)
+... submit --engine cursor --model composer-2.5 --slug build --workspace <repo> --prompt "..."
+
+# Cursor with Grok 4.6, non-fast, choosing the reasoning level
+... submit --engine cursor --model cursor-grok-4.6 --effort xhigh --slug review ...
+```
+
+**Model and reasoning level.** Cursor bakes the reasoning level into the model id, so `--effort`
+selects the suffix rather than a separate parameter:
+
+| `--effort` | `cursor-grok-4.6` | `composer-2.5` |
+|---|---|---|
+| `low` / `medium` / `xhigh` | `-low` / `-medium` / `-xhigh` | `composer-2.5` (no levels) |
+| `ultra` | `-xhigh` (no higher tier exists) | `composer-2.5` |
+
+Families differ -- Grok 4.6 stops at `xhigh` while Luna and Sol also offer `max` -- so resolution
+is checked against `cursor-agent --list-models` rather than assumed, and **submit fails
+immediately** with the available ids if a pairing does not exist. The resolved id is echoed on
+submit (`model=cursor-grok-4.6-xhigh`) so there is never doubt about what a job actually ran.
+Jobs are **non-fast** unless you pass `--fast`. To reach a level `--effort` cannot express, name
+the full id: `--model cursor-grok-4.6-high`.
+
+**Differences worth knowing before choosing Cursor:**
+
+- **No mid-turn control.** `cursor-agent -p` is a one-shot process with no channel to inject into
+  a running turn, so `steer` and `ask` are rejected with a clear message rather than silently
+  dropped. `stop` still works (it terminates the process).
+- **Reasoning is visible.** Cursor streams `thinking` text into the log; Codex emits only a
+  marker. Cursor jobs are genuinely easier to supervise with `watch`.
+- **Sandbox mapping.** `read-only` runs in Cursor's plan mode (read-only by construction);
+  `workspace-write` and `danger-full-access` pass `--force` so a headless run never stalls waiting
+  for an approval nobody is there to give.
+- **Tokens** arrive once at the end rather than incrementally, and Cursor reports no context-window
+  figure, so that field stays null.
 
 ## Job parameters
 

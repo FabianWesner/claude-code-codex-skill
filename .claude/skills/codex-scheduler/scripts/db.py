@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   tokens_output INTEGER,
   tokens_reasoning INTEGER,
   tokens_total INTEGER,
-  context_window INTEGER
+  context_window INTEGER,
+  engine TEXT NOT NULL DEFAULT 'codex'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_slug ON jobs(slug) WHERE status IN ('queued','running');
 CREATE INDEX IF NOT EXISTS jobs_session ON jobs(claude_session_id);
@@ -108,6 +109,10 @@ INSERT OR IGNORE INTO config(id) VALUES (1);
 VALID_EFFORT = ("low", "medium", "xhigh", "ultra")
 VALID_SANDBOX = ("read-only", "workspace-write", "danger-full-access")
 VALID_STATUS = ("queued", "running", "done", "failed", "stopped")
+# Which agent CLI runs the job. 'codex' drives `codex app-server` over JSON-RPC;
+# 'cursor' drives `cursor-agent -p --output-format stream-json` as a one-shot subprocess.
+VALID_ENGINE = ("codex", "cursor")
+DEFAULT_MODEL = {"codex": "gpt-5.6-sol", "cursor": "composer-2.5"}
 
 
 def ensure_state_dirs():
@@ -134,6 +139,7 @@ _ADDED_COLUMNS = [
     ("jobs", "tokens_reasoning", "INTEGER"),
     ("jobs", "tokens_total", "INTEGER"),
     ("jobs", "context_window", "INTEGER"),
+    ("jobs", "engine", "TEXT NOT NULL DEFAULT 'codex'"),
 ]
 
 

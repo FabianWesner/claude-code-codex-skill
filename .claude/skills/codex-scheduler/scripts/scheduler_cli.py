@@ -168,6 +168,11 @@ def validate_job_spec(spec):
         err(f"job '{spec['slug']}': workspace must be an absolute path")
     if not os.path.isdir(workspace):
         err(f"job '{spec['slug']}': workspace '{workspace}' is not a directory")
+    engine = spec.get("engine", "codex")
+    if engine not in db.VALID_ENGINE:
+        err(f"job '{spec['slug']}': engine must be one of {db.VALID_ENGINE}")
+    if engine == "cursor":
+        validate_cursor_model(spec)
     effort = spec.get("effort", "medium")
     if effort not in db.VALID_EFFORT:
         err(f"job '{spec['slug']}': effort must be one of {db.VALID_EFFORT}")
@@ -243,17 +248,49 @@ def resolve_dep(conn, slug, batch_map):
 def insert_job(conn, session_id, spec):
     cur = conn.execute(
         """INSERT INTO jobs (slug, prompt, workspace, model, effort, fast_mode, sandbox,
-                              claude_session_id, priority, result_schema, cite_mode, max_seconds)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              claude_session_id, priority, result_schema, cite_mode, max_seconds,
+                              engine)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             spec["slug"], spec["prompt"], spec["workspace"],
-            spec.get("model") or "gpt-5.6-sol", spec.get("effort") or "medium",
+            spec.get("model") or db.DEFAULT_MODEL[spec.get("engine") or "codex"],
+            spec.get("effort") or "medium",
             1 if spec.get("fast_mode") else 0, spec.get("sandbox") or "workspace-write",
             session_id, spec.get("priority", 0),
             spec.get("result_schema"), 1 if spec.get("cite") else 0, spec.get("max_seconds"),
+            spec.get("engine") or "codex",
         ),
     )
     return cur.lastrowid
+
+
+def validate_cursor_model(spec):
+    """Resolve the cursor model up front and check the CLI actually offers it.
+
+    Reasoning level lives inside the model id, and families differ in which levels exist (Grok 4.6
+    has no `max`; Composer has no levels at all), so an unsupported --effort/--model pairing would
+    otherwise only surface as a failed job minutes later. Echoing the resolved id also makes it
+    obvious which model a job really got."""
+    sys.path.insert(0, SCRIPT_DIR)
+    import cursor_client
+
+    resolved = cursor_client.resolve_model(
+        spec.get("model"), spec.get("effort"), spec.get("fast_mode"))
+    spec["resolved_model"] = resolved
+    available = cursor_client.available_models()
+    if available is None:
+        print(f"  note: could not reach `cursor-agent --list-models`; not validating "
+              f"'{resolved}'", file=sys.stderr)
+        return
+    if resolved in available:
+        return
+    family = resolved.split("-")[0]
+    near = sorted(m for m in available if m.startswith(family))[:12]
+    err(f"job '{spec['slug']}': cursor model '{resolved}' is not available.\n"
+        f"  (from --model {spec.get('model') or db.DEFAULT_MODEL['cursor']} "
+        f"+ --effort {spec.get('effort') or 'medium'}"
+        f"{' + --fast' if spec.get('fast_mode') else ''})\n"
+        f"  available in the '{family}' family: {', '.join(near) or '(none)'}")
 
 
 def load_schema_arg(val):
@@ -278,7 +315,7 @@ def cmd_submit(args):
         "model": args.model, "effort": args.effort, "fast_mode": args.fast,
         "sandbox": args.sandbox, "priority": args.priority,
         "result_schema": load_schema_arg(args.schema), "cite": args.cite,
-        "max_seconds": args.max_seconds,
+        "max_seconds": args.max_seconds, "engine": args.engine,
     }
     validate_job_spec(spec)
     conn = db.connect()
@@ -309,7 +346,9 @@ def cmd_submit(args):
             raise
     finally:
         conn.close()
-    extras = [f"sandbox={spec['sandbox']}"]
+    extras = [f"engine={spec.get('engine') or 'codex'}", f"sandbox={spec['sandbox']}"]
+    if spec.get("resolved_model"):
+        extras.insert(1, f"model={spec['resolved_model']}")
     if spec.get("result_schema"):
         extras.append("schema")
     if spec.get("cite"):
@@ -338,6 +377,7 @@ def cmd_submit_batch(args):
         spec["workspace"] = os.path.abspath(spec["workspace"])
         spec.setdefault("priority", 0)
         spec.setdefault("sandbox", "workspace-write")
+        spec.setdefault("engine", "codex")
         if spec.get("schema") and not spec.get("result_schema"):
             # a batch spec may give `schema` as an inline object, a JSON string, or a file path
             spec["result_schema"] = (
@@ -1127,7 +1167,12 @@ def build_parser():
     pg.add_argument("--prompt")
     pg.add_argument("--prompt-file")
     s.add_argument("--deps", default="")
-    s.add_argument("--model", default="gpt-5.6-sol")
+    s.add_argument("--engine", default="codex", choices=db.VALID_ENGINE,
+                    help="which agent CLI runs the job: 'codex' (default) or 'cursor' "
+                         "(cursor-agent; default model cursor-grok-4.6, non-fast)")
+    s.add_argument("--model", default=None,
+                    help="model id; defaults per engine (codex: gpt-5.6-sol, "
+                         "cursor: cursor-grok-4.6 with the level from --effort)")
     s.add_argument("--effort", default="medium", choices=db.VALID_EFFORT)
     s.add_argument("--fast", action="store_true")
     s.add_argument("--sandbox", default="workspace-write", choices=db.VALID_SANDBOX)

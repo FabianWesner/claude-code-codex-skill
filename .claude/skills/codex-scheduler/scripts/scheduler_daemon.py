@@ -22,6 +22,7 @@ import time
 
 import db
 import appserver_client
+import cursor_client
 
 TICK_SECONDS = 2.0
 _hooks = {"tokens": None, "ask": None, "checkpoint": None, "message": None}
@@ -342,14 +343,19 @@ def launch_ready_jobs(conn, state, on_done, on_tokens=None, on_ask_answer=None):
         # that reaping and hang detection could never see, stuck until a daemon restart. Failing it
         # here keeps the no-auto-retry contract while making the failure visible via `wait`.
         try:
-            js = appserver_client.JobSession(
+            # Both drivers expose the same interface, so everything downstream -- reaping, hang
+            # detection, budgets, the control plane -- is engine-agnostic.
+            driver = (cursor_client.CursorSession if job.get("engine") == "cursor"
+                      else appserver_client.JobSession)
+            js = driver(
                 job, on_done, on_tokens=on_tokens, on_ask_answer=on_ask_answer,
                 on_checkpoint=_hooks["checkpoint"], on_message=_hooks["message"],
             )
         except Exception as e:  # noqa
             conn.execute(
                 "UPDATE jobs SET status='failed', error=?, finished_at=? WHERE id=? AND status='running'",
-                (f"failed to start codex app-server: {e}", db.now_iso(), job["id"]),
+                (f"failed to start {job.get('engine') or 'codex'} engine: {e}",
+                 db.now_iso(), job["id"]),
             )
             conn.commit()
             log(f"job #{job['id']} ({job['slug']}) failed to launch: {e}")
