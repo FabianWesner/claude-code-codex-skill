@@ -1,6 +1,6 @@
 # Claude Code Codex Skill
 
-Claude Code skills for running headless Codex as an orchestration sub-agent. Two skills:
+Claude Code skills. Three skills:
 
 - **`codex-subagent`** — the primitives: one-shot Codex runs and steerable Codex app-server
   sessions, driven directly.
@@ -9,6 +9,9 @@ Claude Code skills for running headless Codex as an orchestration sub-agent. Two
   configurable parallelism limit and notifies the submitting Claude session natively (via
   Claude Code's background-task mechanism) when a job finishes or fails, instead of requiring
   Claude to keep polling. Includes a live local dashboard.
+- **`issue-tracker`** — a per-project issue tracker with a live kanban board: Open, Planned,
+  In Progress, Deployed, Done, Cancelled. Claude files, moves, and flags issues from the CLI;
+  the board is a read-only view at `localhost:2345`, live over SSE.
 
 ## What Is Included
 
@@ -21,27 +24,33 @@ Claude Code skills for running headless Codex as an orchestration sub-agent. Two
 - `.claude/skills/codex-scheduler/scripts/scheduler_daemon.py` — the global orchestrator (dependency graph, parallelism limit, hang/crash recovery).
 - `.claude/skills/codex-scheduler/scripts/scheduler_cli.py` — the CLI Claude actually calls (submit/list/show/wait/steer/stop/rm/edit/reorder/config/ui).
 - `.claude/skills/codex-scheduler/scripts/dashboard.py` + `scripts/static/index.html` — the live local dashboard.
+- `.claude/skills/issue-tracker/SKILL.md` documents the issue-tracker skill.
+- `.claude/skills/issue-tracker/issues.js` — the CLI Claude calls (add/start/deploy/done/cancel/flag/list/show/...).
+- `.claude/skills/issue-tracker/store.js` — the file-backed store (`~/.claude/issues/<project>/<n>.json`, one file per issue).
+- `.claude/skills/issue-tracker/server.js` + `board.html` — the live kanban board, autostarted by the CLI.
 
 ## Requirements
 
 - Claude Code with local skill support.
-- OpenAI Codex CLI installed and authenticated.
-- Python 3.9 or newer (stdlib only — no extra dependencies for either skill).
+- OpenAI Codex CLI installed and authenticated (for `codex-subagent` / `codex-scheduler` only).
+- Python 3.9 or newer (stdlib only) for `codex-subagent` / `codex-scheduler`.
+- Node.js (no dependencies) for `issue-tracker`.
 
 The bundled recipes assume the Codex CLI is available as `codex` and that authentication is already configured for the local user.
 
 ## Installation
 
-Symlink both skill directories into your Claude skills directory:
+Symlink the skill directories you want into your Claude skills directory:
 
 ```bash
 mkdir -p ~/.claude/skills
 ln -s "$(pwd)/.claude/skills/codex-subagent" ~/.claude/skills/codex-subagent
 ln -s "$(pwd)/.claude/skills/codex-scheduler" ~/.claude/skills/codex-scheduler
+ln -s "$(pwd)/.claude/skills/issue-tracker" ~/.claude/skills/issue-tracker
 ```
 
 Restart Claude Code after installing so it can discover the new skill metadata. Use a real symlink
-(not a copy) — both skills are meant to be edited in place here and picked up live.
+(not a copy) — each skill is meant to be edited in place here and picked up live.
 
 ## Usage
 
@@ -50,6 +59,7 @@ Open each skill file for its full operating rules and verified command patterns:
 ```bash
 cat .claude/skills/codex-subagent/SKILL.md
 cat .claude/skills/codex-scheduler/SKILL.md
+cat .claude/skills/issue-tracker/SKILL.md
 ```
 
 `codex-subagent` covers:
@@ -76,6 +86,21 @@ cat .claude/skills/codex-scheduler/SKILL.md
   `wait` channel as job completion
 - a daily `npm install -g @openai/codex` before the first job launches each day, so Codex stays
   current
+
+`issue-tracker` covers:
+
+- filing bugs and features, and moving them through Open → Planned → In Progress → Deployed →
+  Done → Cancelled — none of the steps are mandatory
+- flagging any active issue for the user's attention, with a required reason shown right on the
+  card; clears only when the issue is actually resolved, not just moved
+- per-project boards, numbered independently (`#01`, `#02`, ...), auto-detected from the git repo
+  containing the working directory
+- a live kanban board at **http://localhost:2345**, autostarted by the CLI on first use, updating
+  over SSE with no reload — six columns side by side, each independently collapsible
+- Done and Cancelled show only the last 12 hours; every other column is never filtered
+- every column sorts newest-created first
+- one JSON file per issue under `~/.claude/issues/<project>/`, atomic writes, safe for concurrent
+  sessions
 
 ## License
 

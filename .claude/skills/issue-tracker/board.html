@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issues</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f4f1;
+    --surface: #efede8;
+    --card: #ffffff;
+    --ink: #1b1a18;
+    --ink-2: #5d5952;
+    --ink-3: #8d877d;
+    --line: #e2dfd9;
+    --line-2: #cfcbc3;
+
+    --open: #7b8794;
+    --planned: #5c7ea8;
+    --progress: #c2703a;
+    --done: #4e8055;
+    --cancelled: #9a938a;
+    --hold: #a8720f;
+    --hold-bg: #fbf0da;
+
+    --bug: #b8442f;
+    --bug-bg: #fbecea;
+    --feature: #4a5fa8;
+    --feature-bg: #ebeefa;
+    --deployed: #2f7a9e;
+
+    --shadow: 0 1px 1px rgba(27,26,24,.04), 0 3px 8px rgba(27,26,24,.05);
+    --shadow-hi: 0 1px 1px rgba(27,26,24,.05), 0 6px 18px rgba(27,26,24,.09);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+  }
+  /* Dark tokens live in two places on purpose: the media query follows the OS,
+     the attribute rule lets ?theme=dark pin it. Keep the two blocks in sync. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161514;
+      --surface: #1d1c1b;
+      --card: #262423;
+      --ink: #edebe6;
+      --ink-2: #a6a098;
+      --ink-3: #78726a;
+      --line: #302e2c;
+      --line-2: #403d3a;
+
+      --open: #8c98a5;
+      --planned: #8fb4dd;
+      --progress: #dd8a52;
+      --done: #6fa377;
+      --cancelled: #7d766d;
+      --hold: #e0aa4f;
+      --hold-bg: #3a2c14;
+
+      --bug: #e0705a;
+      --bug-bg: #3a201c;
+      --feature: #8296dd;
+      --feature-bg: #22273f;
+      --deployed: #6fb8d9;
+
+      --shadow: 0 1px 1px rgba(0,0,0,.25), 0 3px 8px rgba(0,0,0,.2);
+      --shadow-hi: 0 1px 1px rgba(0,0,0,.3), 0 6px 18px rgba(0,0,0,.35);
+    }
+  }
+
+  :root[data-theme="dark"] {
+      --bg: #161514;
+      --surface: #1d1c1b;
+      --card: #262423;
+      --ink: #edebe6;
+      --ink-2: #a6a098;
+      --ink-3: #78726a;
+      --line: #302e2c;
+      --line-2: #403d3a;
+
+      --open: #8c98a5;
+      --planned: #8fb4dd;
+      --progress: #dd8a52;
+      --done: #6fa377;
+      --cancelled: #7d766d;
+      --hold: #e0aa4f;
+      --hold-bg: #3a2c14;
+
+      --bug: #e0705a;
+      --bug-bg: #3a201c;
+      --feature: #8296dd;
+      --feature-bg: #22273f;
+      --deployed: #6fb8d9;
+
+      --shadow: 0 1px 1px rgba(0,0,0,.25), 0 3px 8px rgba(0,0,0,.2);
+      --shadow-hi: 0 1px 1px rgba(0,0,0,.3), 0 6px 18px rgba(0,0,0,.35);
+    }
+
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+
+  /* ---- header ---- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    background: color-mix(in srgb, var(--bg) 90%, transparent);
+    backdrop-filter: saturate(1.4) blur(10px);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 22px 0;
+  }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; padding: 8px 0 0; margin-bottom: -1px; }
+  .tab {
+    font: 550 12.5px/1 var(--sans); cursor: pointer;
+    padding: 7px 12px 8px; border: 1px solid transparent; border-bottom: none;
+    border-radius: 8px 8px 0 0; background: transparent; color: var(--ink-2);
+    display: inline-flex; align-items: center; gap: 7px;
+    transition: background .13s, color .13s;
+  }
+  .tab:hover { background: color-mix(in srgb, var(--surface) 70%, transparent); color: var(--ink); }
+  .tab[aria-selected="true"] {
+    background: var(--bg); border-color: var(--line); color: var(--ink);
+    box-shadow: 0 1px 0 var(--bg);
+  }
+  .tab .n {
+    font: 500 10.5px/1 var(--mono); padding: 3px 5px; border-radius: 4px;
+    background: var(--surface); color: var(--ink-3); font-variant-numeric: tabular-nums;
+  }
+  .tab[aria-selected="true"] .n { background: var(--line); color: var(--ink-2); }
+
+  /* ---- board ---- */
+  main { padding: 14px 22px 44px; }
+  /* Always five columns in a single row, like a real kanban board. A narrow
+     viewport scrolls the board horizontally instead of wrapping columns onto a
+     second row. */
+  .board {
+    display: grid; gap: 14px; align-items: start;
+    overflow-x: auto; padding-bottom: 4px; scrollbar-gutter: stable;
+    /* grid-template-columns is set inline per render — each column is either
+       minmax(240px, 1fr) expanded or minmax(40px, 0.1fr) collapsed, so a
+       collapsed column tracks at exactly 1/4 an expanded one's width as the
+       window resizes, not a one-time snapshot. */
+  }
+
+  .col {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 11px 11px; min-width: 0;
+  }
+  .col-head {
+    display: flex; align-items: center; gap: 8px; padding: 1px 3px 11px;
+    cursor: pointer; border-radius: 6px; margin: -1px -3px 10px;
+  }
+  .col-head:hover { background: color-mix(in srgb, var(--line) 55%, transparent); }
+  .chev {
+    flex: none; font-size: 9px; line-height: 1; color: var(--ink-3);
+    transform: rotate(0deg); transition: transform .15s ease;
+  }
+  .col-head .swatch { width: 8px; height: 8px; border-radius: 3px; background: var(--tint); flex: none; }
+  .col-head .name { font-size: 12px; font-weight: 660; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-2); }
+  .col-head .n { margin-left: auto; font: 550 12px/1 var(--mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .col-head .holdcount {
+    font: 650 11px/1 var(--sans); color: var(--hold);
+    background: var(--hold-bg); padding: 3px 6px; border-radius: 5px;
+  }
+  .col-note { font-size: 10.5px; color: var(--ink-3); letter-spacing: .03em; padding: 0 3px 9px; margin-top: -7px; }
+
+  /* Fixed, not min: every collapsed column is exactly this tall regardless of
+     label length, so the count sits at the same offset in every one of them —
+     "IN PROGRESS" needs ~139px of vertical text; this leaves it headroom. */
+  .col.collapsed { height: 172px; padding: 10px 2px 12px; }
+  .col.collapsed .col-head {
+    flex-direction: column; align-items: center; gap: 7px;
+    margin: 0; padding: 0; height: 100%;
+  }
+  .col.collapsed .col-head:hover { background: transparent; }
+  .col.collapsed .chev { transform: rotate(-90deg); }
+  .col.collapsed .col-head .name {
+    writing-mode: vertical-rl; transform: rotate(180deg);
+    white-space: nowrap; flex: 1 0 auto;
+  }
+  .col.collapsed .col-head .n { margin-left: 0; }
+
+  .col[data-col="open"]        { --tint: var(--open); }
+  .col[data-col="planned"]     { --tint: var(--planned); }
+  .col[data-col="in_progress"] { --tint: var(--progress); }
+  .col[data-col="deployed"]    { --tint: var(--deployed); }
+  .col[data-col="done"]        { --tint: var(--done); }
+  .col[data-col="cancelled"]   { --tint: var(--cancelled); }
+
+  .stack { display: flex; flex-direction: column; gap: 8px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 11px 9px;
+    box-shadow: var(--shadow);
+    transition: box-shadow .15s ease, transform .15s ease;
+  }
+  .card:hover { box-shadow: var(--shadow-hi); transform: translateY(-1px); }
+  .card.flash { animation: flash 1.5s ease-out; }
+  @keyframes flash {
+    0%   { box-shadow: 0 0 0 2px var(--tint), var(--shadow); }
+    100% { box-shadow: 0 0 0 0 transparent, var(--shadow); }
+  }
+
+  .card-top { display: flex; gap: 8px; align-items: baseline; }
+  .no { font: 500 11px/1.5 var(--mono); color: var(--ink-3); flex: none; font-variant-numeric: tabular-nums; }
+  .ttl { font-size: 13.5px; font-weight: 550; letter-spacing: -.006em; color: var(--ink); word-break: break-word; }
+
+  .col[data-col="cancelled"] .card { opacity: .66; }
+  .col[data-col="cancelled"] .ttl { text-decoration: line-through; text-decoration-color: var(--ink-3); text-decoration-thickness: 1px; }
+  .col[data-col="done"] .card { opacity: .84; }
+
+  .reason { margin: 6px 0 0 24px; font-size: 11.5px; color: var(--ink-3); font-style: italic; }
+
+  .card.flagged {
+    border-color: color-mix(in srgb, var(--hold) 45%, var(--line));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--hold) 25%, transparent), var(--shadow);
+  }
+  .hold {
+    display: flex; align-items: flex-start; gap: 6px;
+    margin-top: 8px; padding: 7px 9px; border-radius: 7px;
+    background: var(--hold-bg); color: var(--hold);
+  }
+  .hold .flagicon { flex: none; line-height: 1.35; }
+  .hold .holdtext { font-size: 11.5px; line-height: 1.4; color: var(--hold); }
+  .hold .holdtext b { font-weight: 700; letter-spacing: .02em; }
+  .hold .holdtext span { color: color-mix(in srgb, var(--hold) 78%, var(--ink)); }
+
+
+  .foot { display: flex; align-items: center; gap: 7px; margin: 9px 0 0 24px; flex-wrap: wrap; }
+  .pill {
+    font: 640 9.5px/1 var(--sans); letter-spacing: .07em; text-transform: uppercase;
+    padding: 4px 6px; border-radius: 4px;
+  }
+  .pill.bug     { background: var(--bug-bg); color: var(--bug); }
+  .pill.feature { background: var(--feature-bg); color: var(--feature); }
+
+  .size { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); font-size: 11px; }
+  .bars { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 9px; }
+  .bars i { width: 2.5px; border-radius: 1px; background: var(--line-2); display: block; }
+  .bars i:nth-child(1) { height: 3px; }
+  .bars i:nth-child(2) { height: 6px; }
+  .bars i:nth-child(3) { height: 9px; }
+  .size[data-size="Small"]  .bars i:nth-child(-n+1),
+  .size[data-size="Medium"] .bars i:nth-child(-n+2),
+  .size[data-size="Big"]    .bars i:nth-child(-n+3) { background: var(--ink-3); }
+
+  .age { margin-left: auto; font: 400 10.5px/1 var(--mono); color: var(--ink-3); }
+
+  .empty { color: var(--ink-3); font-size: 12px; padding: 9px 4px 11px; font-style: italic; }
+  .older {
+    margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--line-2);
+    font-size: 11px; color: var(--ink-3); text-align: center;
+  }
+
+  .blank {
+    max-width: 520px; margin: 60px auto; text-align: center; color: var(--ink-2);
+  }
+  .blank h2 { font-size: 16px; font-weight: 600; color: var(--ink); margin: 0 0 8px; }
+  .blank p { margin: 0 0 16px; font-size: 13.5px; }
+  .blank code {
+    display: block; font: 12px/1.7 var(--mono); text-align: left;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 9px; padding: 12px 14px; color: var(--ink);
+    white-space: pre-wrap; word-break: break-word;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="tabs" id="tabs" role="tablist"></div>
+</header>
+
+<main id="main"></main>
+
+<script>
+const themeParam = new URLSearchParams(location.search).get('theme');
+if (themeParam === 'dark' || themeParam === 'light') document.documentElement.dataset.theme = themeParam;
+
+const COLUMNS = [
+  { key: 'open',        label: 'Open' },
+  { key: 'planned',     label: 'Planned' },
+  { key: 'in_progress', label: 'In Progress' },
+  { key: 'deployed',    label: 'Deployed' },
+  { key: 'done',        label: 'Done' },
+  { key: 'cancelled',   label: 'Cancelled' },
+];
+
+let snap = { projects: [], boards: {}, windowHours: 12 };
+
+const COLLAPSE_KEY = 'issues.collapsed';
+function loadCollapsed() {
+  try {
+    const raw = localStorage.getItem(COLLAPSE_KEY);
+    if (raw !== null) return new Set(JSON.parse(raw));
+  } catch { /* fall through to the default */ }
+  return new Set(['done', 'cancelled']); // the two columns you usually don't need open
+}
+function saveCollapsed() {
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsed])); } catch { /* per-viewer convenience only */ }
+}
+let collapsed = loadCollapsed();
+let active = localStorage.getItem('issues.project') || null;
+let seen = null; // Set of "slug#id:status" — null until the first payload lands.
+
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function age(iso) {
+  if (!iso) return '';
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'now';
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+function currentProject() {
+  if (active && snap.boards[active]) return active;
+  return snap.projects.length ? snap.projects[0].slug : null;
+}
+
+function renderTabs() {
+  const cur = currentProject();
+  // Alphabetical, not by recency: tabs that reshuffle under the pointer every
+  // time an issue changes are worse than tabs in a boring order.
+  const tabs = [...snap.projects].sort((a, b) => a.name.localeCompare(b.name));
+  el('tabs').innerHTML = tabs
+    .map((p) => `<button class="tab" role="tab" aria-selected="${p.slug === cur}" data-slug="${esc(p.slug)}" title="${esc(p.path || p.slug)}">${esc(p.name)}<span class="n">${p.open}</span></button>`)
+    .join('');
+
+  const board = cur ? snap.boards[cur] : null;
+  if (!board) {
+    return;
+  }
+  const c = board.columns;
+}
+
+function card(issue, slug, colKey) {
+  const key = `${slug}#${issue.id}:${issue.status}`;
+  const isNew = seen !== null && !seen.has(key);
+  const stamp = colKey === 'done' || colKey === 'cancelled' ? issue.resolvedAt : issue.createdAt;
+  return `<article class="card${isNew ? ' flash' : ''}${issue.flagged ? ' flagged' : ''}">
+    <div class="card-top">
+      <span class="no">#${String(issue.id).padStart(2, '0')}</span>
+      <span class="ttl">${esc(issue.title)}</span>
+    </div>
+    ${issue.reason ? `<div class="reason">${esc(issue.reason)}</div>` : ''}
+    ${issue.flagged ? `<div class="hold"><span class="flagicon">\u2691</span><span class="holdtext"><b>On hold</b> <span>${esc(issue.flagReason)}</span></span></div>` : ''}
+    <div class="foot">
+      <span class="pill ${issue.type}">${issue.type === 'bug' ? 'Bug' : 'Feature'}</span>
+      <span class="size" data-size="${esc(issue.size)}"><span class="bars"><i></i><i></i><i></i></span>${esc(issue.size)}</span>
+      <span class="age" title="${esc(stamp || '')}">${age(stamp)}</span>
+    </div>
+  </article>`;
+}
+
+function render() {
+  renderTabs();
+  const slug = currentProject();
+
+  if (!slug) {
+    el('main').innerHTML = `<div class="blank">
+      <h2>No issues yet</h2>
+      <p>Boards appear once a project has its first issue.</p>
+      <code>node ~/.claude/skills/issue-tracker/issues.js add "Brief title" --type bug --size Small</code>
+    </div>`;
+    return;
+  }
+
+  const board = snap.boards[slug];
+  const track = (key) => (collapsed.has(key) ? 'minmax(40px, 0.1fr)' : 'minmax(240px, 1fr)');
+  const gridTemplateColumns = COLUMNS.map(({ key }) => track(key)).join(' ');
+
+  el('main').innerHTML = `<div class="board" style="grid-template-columns:${gridTemplateColumns}">${COLUMNS.map(({ key, label }) => {
+    const items = board.columns[key] || [];
+    const hidden = board.hidden[key] || 0;
+    const windowed = key === 'done' || key === 'cancelled';
+    const flaggedCount = items.filter((i) => i.flagged).length;
+    const isCollapsed = collapsed.has(key);
+
+    const head = `<div class="col-head" title="${isCollapsed ? `Expand ${esc(label)}` : `Collapse ${esc(label)}`}">
+      <span class="chev">\u25be</span>
+      <span class="swatch"></span><span class="name">${esc(label)}</span>
+      ${!isCollapsed && flaggedCount ? `<span class="holdcount">\u2691 ${flaggedCount}</span>` : ''}
+      <span class="n">${items.length}</span>
+    </div>`;
+
+    if (isCollapsed) {
+      return `<section class="col collapsed" data-col="${key}">${head}</section>`;
+    }
+
+    return `<section class="col" data-col="${key}">
+      ${head}
+      ${windowed ? `<div class="col-note">LAST ${snap.windowHours}H</div>` : ''}
+      ${items.length ? `<div class="stack">${items.map((i) => card(i, slug, key)).join('')}</div>` : `<div class="empty">Nothing here.</div>`}
+      ${hidden ? `<div class="older">${hidden} older ${hidden === 1 ? 'issue' : 'issues'} hidden</div>` : ''}
+    </section>`;
+  }).join('')}</div>`;
+
+  // Everything currently on screen counts as seen, so only real changes flash.
+  const next = new Set();
+  for (const p of snap.projects) {
+    const b = snap.boards[p.slug];
+    for (const col of Object.values(b.columns)) for (const i of col) next.add(`${p.slug}#${i.id}:${i.status}`);
+  }
+  seen = next;
+}
+
+document.addEventListener('click', (e) => {
+  const tab = e.target.closest('.tab');
+  if (tab) {
+    active = tab.dataset.slug;
+    localStorage.setItem('issues.project', active);
+    render();
+    return;
+  }
+
+  const head = e.target.closest('.col-head');
+  if (head) {
+    const key = head.closest('.col').dataset.col;
+    if (collapsed.has(key)) collapsed.delete(key);
+    else collapsed.add(key);
+    saveCollapsed();
+    render();
+  }
+});
+
+function connect() {
+  const es = new EventSource('/events');
+  es.onmessage = (ev) => { snap = JSON.parse(ev.data); render(); };
+  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+}
+
+connect();
+// Keeps the relative ages honest without waiting for a server push.
+setInterval(() => { if (snap.projects.length) render(); }, 60000);
+</script>
+</body>
+</html>
