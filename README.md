@@ -1,6 +1,6 @@
 # Claude Code Codex Skill
 
-Claude Code skills. Three skills:
+Claude Code skills. Four skills:
 
 - **`codex-subagent`** — the primitives: one-shot Codex runs and steerable Codex app-server
   sessions, driven directly.
@@ -12,6 +12,10 @@ Claude Code skills. Three skills:
 - **`issue-tracker`** — a per-project issue tracker with a live kanban board: Open, Planned,
   In Progress, Deployed, Done, Cancelled. Claude files, moves, and flags issues from the CLI;
   the board is a read-only view at `localhost:2345`, live over SSE.
+- **`logbook`** — a template for a Twitter-style status feed, published as an Artifact, where
+  Claude reports outcomes to its user on a loop (hourly, plus ad-hoc alerts and questions). Ships
+  as an empty starter — fill in the project name and artifact URL, and adjust the writing rules
+  to your user, before using it for real.
 
 ## What Is Included
 
@@ -28,6 +32,8 @@ Claude Code skills. Three skills:
 - `.claude/skills/issue-tracker/issues.js` — the CLI Claude calls (add/start/deploy/done/cancel/flag/list/show/...).
 - `.claude/skills/issue-tracker/store.js` — the file-backed store (`~/.claude/issues/<project>/<n>.json`, one file per issue).
 - `.claude/skills/issue-tracker/server.js` + `board.html` — the live kanban board, autostarted by the CLI.
+- `.claude/skills/logbook/SKILL.md` documents the logbook skill — a template, fill in `PROJECT_NAME` and `ARTIFACT_URL` before using it.
+- `.claude/skills/logbook/logbook.html` — an empty starter feed with one entry; publish it once with the Artifact tool to get your `ARTIFACT_URL`.
 
 ## Requirements
 
@@ -47,6 +53,7 @@ mkdir -p ~/.claude/skills
 ln -s "$(pwd)/.claude/skills/codex-subagent" ~/.claude/skills/codex-subagent
 ln -s "$(pwd)/.claude/skills/codex-scheduler" ~/.claude/skills/codex-scheduler
 ln -s "$(pwd)/.claude/skills/issue-tracker" ~/.claude/skills/issue-tracker
+ln -s "$(pwd)/.claude/skills/logbook" ~/.claude/skills/logbook
 ```
 
 Restart Claude Code after installing so it can discover the new skill metadata. Use a real symlink
@@ -60,6 +67,7 @@ Open each skill file for its full operating rules and verified command patterns:
 cat .claude/skills/codex-subagent/SKILL.md
 cat .claude/skills/codex-scheduler/SKILL.md
 cat .claude/skills/issue-tracker/SKILL.md
+cat .claude/skills/logbook/SKILL.md
 ```
 
 `codex-subagent` covers:
@@ -101,6 +109,18 @@ cat .claude/skills/issue-tracker/SKILL.md
 - every column sorts newest-created first
 - one JSON file per issue under `~/.claude/issues/<project>/`, atomic writes, safe for concurrent
   sessions
+
+`logbook` covers:
+
+- a Twitter-style feed, published as a Claude Artifact, that Claude writes to on a `/loop` tick
+  or ad-hoc — reports, alerts, and questions, each its own entry type
+- writing rules aimed at outcomes over process: short entries, screenshots for visual changes,
+  never editing a published entry after the fact
+- a pinned "open questions" box, separate from the main timeline, so anything waiting on the user
+  doesn't get lost in the feed
+- ships as a **template** — an empty starter feed with one entry, `PROJECT_NAME` and
+  `ARTIFACT_URL` placeholders to fill in, and writing rules meant to be adjusted to the user
+  rather than used as-is
 
 ## License
 

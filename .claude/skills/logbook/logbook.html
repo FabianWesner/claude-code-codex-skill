@@ -1,0 +1,190 @@
+<title>Project Logbook</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #ffffff;
+    --ink: #0f1419;
+    --muted: #536471;
+    --line: #eff3f4;
+    --accent: #1d9bf0;
+    --accent-soft: #e8f5fd;
+    --alert: #d93a2b;
+    --alert-bg: #fdeeec;
+    --question: #b0740c;
+    --question-bg: #fbf3e4;
+    --report: #00885f;
+    --report-bg: #e7f5f0;
+    --pin-bg: #f7f9f9;
+    --avatar-bg: #1d9bf0;
+    --avatar-ink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101418;
+      --ink: #e7e9ea;
+      --muted: #71767b;
+      --line: #23292e;
+      --accent: #1d9bf0;
+      --accent-soft: #132836;
+      --alert: #f0664f;
+      --alert-bg: #2e1a16;
+      --question: #dfa435;
+      --question-bg: #2c2312;
+      --report: #38c793;
+      --report-bg: #12281f;
+      --pin-bg: #16202a;
+      --avatar-bg: #1d9bf0;
+      --avatar-ink: #ffffff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101418;
+    --ink: #e7e9ea;
+    --muted: #71767b;
+    --line: #23292e;
+    --accent: #1d9bf0;
+    --accent-soft: #132836;
+    --alert: #f0664f;
+    --alert-bg: #2e1a16;
+    --question: #dfa435;
+    --question-bg: #2c2312;
+    --report: #38c793;
+    --report-bg: #12281f;
+    --pin-bg: #16202a;
+    --avatar-bg: #1d9bf0;
+    --avatar-ink: #ffffff;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", -apple-system, "Segoe UI", sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .col {
+    max-width: 600px;
+    margin: 0 auto;
+    min-height: 100vh;
+    border-left: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    backdrop-filter: blur(12px);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    border-bottom: 1px solid var(--line);
+    padding: 12px 16px;
+  }
+  h1 { font-size: 19px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  .sub { font-size: 13px; color: var(--muted); margin-top: 1px; }
+  .pinned {
+    background: var(--pin-bg);
+    border-bottom: 1px solid var(--line);
+    padding: 12px 16px 14px;
+  }
+  .pinned .pin-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12.5px; font-weight: 700; color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .pinned .pin-label svg { width: 14px; height: 14px; fill: var(--muted); }
+  .pinned ul { margin: 0; padding-left: 20px; }
+  .pinned li { margin: 4px 0; }
+  .pinned .none { color: var(--muted); list-style: none; margin-left: -20px; }
+  .day {
+    padding: 10px 16px 8px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px; font-weight: 700; color: var(--muted);
+    position: sticky; top: 58px; z-index: 4;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(12px);
+  }
+  .entry {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: 10px;
+    padding: 12px 16px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .avatar {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--avatar-bg); color: var(--avatar-ink);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 17px;
+    user-select: none;
+  }
+  .entry.alert .avatar { background: var(--alert); }
+  .entry.question .avatar { background: var(--question); }
+  .entry.report .avatar { background: var(--report); }
+  .meta {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-bottom: 2px; font-size: 15px;
+  }
+  .name { font-weight: 700; }
+  .handle, .dot, .time { color: var(--muted); font-size: 14px; }
+  .time { font-variant-numeric: tabular-nums; }
+  .chip {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 2px 9px; border-radius: 999px;
+    margin-left: auto;
+  }
+  .chip.report { background: var(--report-bg); color: var(--report); }
+  .chip.alert { background: var(--alert-bg); color: var(--alert); }
+  .chip.question { background: var(--question-bg); color: var(--question); }
+  .body p { margin: 0 0 8px; }
+  .body p:last-child { margin-bottom: 0; }
+  .body a { color: var(--accent); text-decoration: none; }
+  .body a:hover { text-decoration: underline; }
+  .body ul { margin: 4px 0 8px; padding-left: 20px; }
+  .body li { margin: 3px 0; }
+  .body img {
+    border-radius: 16px; border: 1px solid var(--line);
+    margin-top: 10px; display: block; max-width: 100%;
+  }
+  code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 13px;
+    background: var(--pin-bg);
+    border: 1px solid var(--line);
+    padding: 1px 5px; border-radius: 5px;
+  }
+  .footer-space { height: 80px; }
+</style>
+
+<div class="col">
+  <header>
+    <h1>Project Logbook</h1>
+    <div class="sub">@claude reporting · updated YYYY-MM-DD</div>
+  </header>
+
+  <section class="pinned">
+    <div class="pin-label">
+      <svg viewBox="0 0 24 24"><path d="M17 4v7l2 3v2h-6v5l-1 2-1-2v-5H5v-2l2-3V4a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2z"/></svg>
+      Open questions
+    </div>
+    <ul>
+      <li class="none">No open questions right now.</li>
+    </ul>
+  </section>
+
+  <div class="feed">
+    <div class="day">Day one</div>
+    <article class="entry report">
+      <div class="avatar">C</div>
+      <div>
+        <div class="meta">
+          <span class="name">Claude</span>
+          <span class="handle">@claude</span>
+          <span class="dot">·</span>
+          <span class="time">Sep 1, 17:50</span>
+          <span class="chip report">Report</span>
+        </div>
+        <div class="body">
+          <p>The logbook is live. From here on: one entry per hour summarizing what actually happened, plus ad-hoc posts whenever something needs your attention. Alerts show red, questions gold, and anything waiting on you is pinned at the top.</p>
+        </div>
+      </div>
+    </article>
+  </div>
+
+  <div class="footer-space"></div>
+</div>
