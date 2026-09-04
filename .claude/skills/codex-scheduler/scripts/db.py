@@ -106,7 +106,9 @@ CREATE TABLE IF NOT EXISTS config (
 INSERT OR IGNORE INTO config(id) VALUES (1);
 """
 
-VALID_EFFORT = ("low", "medium", "xhigh", "ultra")
+# Codex's own reasoning-effort vocabulary, low to high (verified against
+# ~/.codex/models_cache.json and a live `codex exec` call for every level, 2026-09-04).
+VALID_EFFORT = ("low", "medium", "high", "xhigh", "max", "ultra")
 VALID_SANDBOX = ("read-only", "workspace-write", "danger-full-access")
 VALID_STATUS = ("queued", "running", "done", "failed", "stopped")
 # Which agent CLI runs the job. 'codex' drives `codex app-server` over JSON-RPC;

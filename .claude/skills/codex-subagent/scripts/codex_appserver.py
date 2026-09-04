@@ -6,8 +6,8 @@ one-shot `codex exec` cannot do. Uses the same ~/.codex/auth.json as the CLI (Ch
 subscription, no API key).
 
 Usage:
-  codex_appserver.py "<prompt>" [--cwd DIR] [--model gpt-5.6-sol]
-                     [--effort low|medium|xhigh|ultra]
+  codex_appserver.py "<prompt>" [--cwd DIR] [--model gpt-5.6-sol|gpt-6-astra|...]
+                     [--effort low|medium|high|xhigh|max|ultra]
                      [--steer "<text>" --steer-after SECS] [-o OUTFILE]
 Prints the final agent message to stdout (and OUTFILE). Streaming + logs go to stderr.
 """
@@ -98,7 +98,7 @@ def main():
     ap.add_argument("prompt")
     ap.add_argument("--cwd", default=os.getcwd())
     ap.add_argument("--model", default="gpt-5.6-sol")
-    ap.add_argument("--effort", default="xhigh", choices=["low", "medium", "xhigh", "ultra"])
+    ap.add_argument("--effort", default="xhigh", choices=["low", "medium", "high", "xhigh", "max", "ultra"])
     ap.add_argument("--steer")
     ap.add_argument("--steer-after", type=float, default=2.0)
     ap.add_argument("-o", "--output")
@@ -110,7 +110,10 @@ def main():
     srv.notify("initialized")
     th = srv.request("thread/start", {"cwd": a.cwd, "approvalPolicy": "never"})
     srv.thread_id = (th.get("thread") or {}).get("id")
-    sys.stderr.write(f"[client] auth ok · model={th.get('model')} · thread={srv.thread_id}\n")
+    # thread/start never receives a model, so th['model'] is just the thread's untouched
+    # config.toml default -- misleading once turn/start (below) overrides it per turn. Report
+    # what was actually requested instead (verified divergent 2026-09-04).
+    sys.stderr.write(f"[client] auth ok · model={a.model} effort={a.effort} · thread={srv.thread_id}\n")
 
     turn = srv.request("turn/start", {
         "threadId": srv.thread_id,

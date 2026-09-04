@@ -16,8 +16,8 @@ Control commands (one per line, appended to <dir>/control):
   quit             shut down
 
 Usage:
-  codex_session.py --dir <session-dir> --cwd <repo> [--model gpt-5.6-sol]
-                   [--effort low|medium|xhigh|ultra]
+  codex_session.py --dir <session-dir> --cwd <repo> [--model gpt-5.6-sol|gpt-6-astra|...]
+                   [--effort low|medium|high|xhigh|max|ultra]
                    [--sandbox read-only|workspace-write] [--prompt "<first turn>"]
 """
 import argparse, json, os, subprocess, sys, threading, time
@@ -147,7 +147,12 @@ class Session:
         self.conn.notify("initialized")
         th = self.conn.request("thread/start", {"cwd": self.a.cwd, "approvalPolicy": "never"})
         self.thread = (th.get("thread") or {}).get("id")
-        self.log(f"[READY thread={self.thread} model={th.get('model')} sandbox={self.a.sandbox}]")
+        # thread/start never receives a model, so th['model'] is just the thread's untouched
+        # config.toml default -- misleading once turn/start (below) overrides it per turn.
+        # Report what was actually requested instead (verified divergent 2026-09-04: local
+        # config.toml default is gpt-5.6-terra, this logged it even when --model gpt-6-astra
+        # was requested and DID run the turn).
+        self.log(f"[READY thread={self.thread} model={self.a.model} effort={self.a.effort} sandbox={self.a.sandbox}]")
         self.status()
         if self.a.prompt:
             self.start_turn(self.a.prompt)
@@ -187,7 +192,7 @@ def main():
     ap.add_argument("--dir", required=True)
     ap.add_argument("--cwd", default=os.getcwd())
     ap.add_argument("--model", default="gpt-5.6-sol")
-    ap.add_argument("--effort", default="xhigh", choices=["low", "medium", "xhigh", "ultra"])
+    ap.add_argument("--effort", default="xhigh", choices=["low", "medium", "high", "xhigh", "max", "ultra"])
     ap.add_argument("--sandbox", default="read-only", choices=["read-only", "workspace-write"])
     ap.add_argument("--prompt")
     Session(ap.parse_args()).run()

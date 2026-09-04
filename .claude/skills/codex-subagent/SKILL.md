@@ -1,15 +1,24 @@
 ---
 name: codex-subagent
-description: Run headless Codex (GPT-5.6 Sol, selectable reasoning) from Bash as an orchestration sub-agent for second opinions, heavy analysis, or bounded code tasks.
+description: Run headless Codex (GPT-5.6 Sol by default, GPT-6-Astra for the hardest problems, selectable reasoning) from Bash as an orchestration sub-agent for second opinions, heavy analysis, or bounded code tasks.
 ---
 
 # Codex as an orchestration sub-agent
 
 Use headless Codex (`codex exec`) to offload heavy work or get an independent second opinion when
 a separate reasoning or coding agent would help. Runs on the ChatGPT login (no metered API key).
-Model: `gpt-5.6-sol`. Reasoning effort is chosen per task by the calling agent — pick one of `low`,
-`medium`, `xhigh`, `ultra` and scale it to the job (`low` for quick lookups, `xhigh`/`ultra` for
-heavy analysis or hard code tasks). The recipes pass `-m` and `model_reasoning_effort` explicitly.
+
+**Model:** `gpt-5.6-sol` by default — the reliable everyday workhorse. For the hardest problems,
+swap in `gpt-6-astra` (a full generation up, not a 5.6-family sibling; "our most capable model for
+complex, demanding work" per Codex's own model listing) — pass `-m gpt-6-astra` in place of
+`-m gpt-5.6-sol` in any recipe below, same flags otherwise. Verified working end to end 2026-09-04,
+both via raw `codex exec` and through both app-server clients below.
+
+**Reasoning effort** is chosen per task by the calling agent — pick one of `low`, `medium`,
+`high`, `xhigh`, `max`, `ultra` (Codex's own vocabulary, low to high) and scale it to the job:
+`low` for quick lookups, `high`/`xhigh` for real analysis, `max`/`ultra` for the hardest code
+tasks — `ultra` additionally triggers Codex's own automatic task delegation, not just deeper
+reasoning. The recipes pass `-m` and `model_reasoning_effort` explicitly.
 
 ## HARD SCOPE RULE
 
@@ -33,13 +42,13 @@ seconds (SMOKE-OK verified 2026-07-04).
 
 (a) One-shot read-only second opinion / analysis:
 ```bash
-codex exec -C <abs-repo> -m gpt-5.6-sol -c model_reasoning_effort="<low|medium|xhigh|ultra>" -s read-only \
+codex exec -C <abs-repo> -m gpt-5.6-sol -c model_reasoning_effort="<low|medium|high|xhigh|max|ultra>" -s read-only \
   -o <abs-out>.txt "<question>"
 ```
 
 (b) Bounded code-writing task (edits the working tree):
 ```bash
-codex exec -C <abs-repo> -m gpt-5.6-sol -c model_reasoning_effort="<low|medium|xhigh|ultra>" -s workspace-write \
+codex exec -C <abs-repo> -m gpt-5.6-sol -c model_reasoning_effort="<low|medium|high|xhigh|max|ultra>" -s workspace-write \
   -o <abs-out>.txt "<imperative task>"
 ```
 
@@ -77,7 +86,7 @@ INTERACTIVE (recommended) — a background session with a file control plane tha
 ```bash
 # 1. launch in the background; optional first --prompt
 python3 .claude/skills/codex-subagent/scripts/codex_session.py \
-  --dir <session-dir> --cwd <abs-repo> --model gpt-5.6-sol --effort <low|medium|xhigh|ultra> [--prompt "<first turn>"]
+  --dir <session-dir> --cwd <abs-repo> --model gpt-5.6-sol --effort <low|medium|high|xhigh|max|ultra> [--prompt "<first turn>"]
 # 2. WATCH live: tail <session-dir>/progress.log (turn start, each exec command, streamed answer, done)
 # 3. DRIVE by appending one command per line to <session-dir>/control:
 echo 'steer: <correction>' >> <session-dir>/control   # inject into the ACTIVE turn
@@ -93,7 +102,7 @@ Codex driven as a sub-agent and corrected while running.
 ONE-SHOT (simpler, no live control) — single turn, optional pre-timed steer:
 ```bash
 python3 .claude/skills/codex-subagent/scripts/codex_appserver.py "<prompt>" \
-  --cwd <abs-repo> --model gpt-5.6-sol --effort <low|medium|xhigh|ultra> -o <abs-out>.txt [--steer "<text>" --steer-after <secs>]
+  --cwd <abs-repo> --model gpt-5.6-sol --effort <low|medium|high|xhigh|max|ultra> -o <abs-out>.txt [--steer "<text>" --steer-after <secs>]
 ```
 Both default to read-only + approvalPolicy=never; the session takes `--sandbox workspace-write` to let
 Codex edit the tree. Prefer plain `codex exec` for fire-and-forget; use these to see and steer a run.

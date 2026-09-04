@@ -304,15 +304,15 @@ selects the suffix rather than a separate parameter:
 
 | `--effort` | `cursor-grok-4.6` | `composer-2.5` |
 |---|---|---|
-| `low` / `medium` / `xhigh` | `-low` / `-medium` / `-xhigh` | `composer-2.5` (no levels) |
-| `ultra` | `-xhigh` (no higher tier exists) | `composer-2.5` |
+| `low` / `medium` / `high` / `xhigh` | `-low` / `-medium` / `-high` / `-xhigh` | `composer-2.5` (no levels) |
+| `max` / `ultra` | `-xhigh` (no higher tier exists) | `composer-2.5` |
 
 Families differ -- Grok 4.6 stops at `xhigh` while Luna and Sol also offer `max` -- so resolution
 is checked against `cursor-agent --list-models` rather than assumed, and **submit fails
 immediately** with the available ids if a pairing does not exist. The resolved id is echoed on
 submit (`model=cursor-grok-4.6-xhigh`) so there is never doubt about what a job actually ran.
-Jobs are **non-fast** unless you pass `--fast`. To reach a level `--effort` cannot express, name
-the full id: `--model cursor-grok-4.6-high`.
+Jobs are **non-fast** unless you pass `--fast`. `--effort max` and `ultra` are equivalent for
+Cursor (there is no tier above `max`, so both just reach for the ceiling a family actually has).
 
 **Differences worth knowing before choosing Cursor:**
 
@@ -329,11 +329,18 @@ the full id: `--model cursor-grok-4.6-high`.
 
 ## Job parameters
 
-- **effort**: `low` | `medium` | `xhigh` | `ultra` — scale to the job like the base skill's
-  recipes (`low` for quick lookups, `xhigh`/`ultra` for heavy analysis or hard code tasks).
-- **model**: defaults to `gpt-5.6-sol`. Codex also exposes cheaper/faster siblings in the same
-  family for lower-stakes jobs — e.g. `gpt-5.6-luna` (verified working via `codex exec -m
-  gpt-5.6-luna`) — pass `--model gpt-5.6-luna` when you don't need the default tier.
+- **effort**: `low` | `medium` | `high` | `xhigh` | `max` | `ultra` — Codex's own reasoning-effort
+  vocabulary, low to high (verified against `~/.codex/models_cache.json` and live `codex exec`
+  calls at every level, 2026-09-04). Scale to the job like the base skill's recipes: `low` for
+  quick lookups, `high`/`xhigh` for real analysis, `max`/`ultra` for the hardest code tasks —
+  `ultra` additionally triggers Codex's own automatic task delegation.
+- **model**: defaults to `gpt-5.6-sol`. For the hardest jobs, `--model gpt-6-astra` (a full
+  generation up, not a 5.6-family sibling — "our most capable model for complex, demanding work"
+  per Codex's own listing) is worth the extra cost/latency; pair it with `--effort
+  high`/`xhigh`/`max`/`ultra`. Verified working end to end 2026-09-04. At the other end, Codex
+  also exposes cheaper/faster 5.6-family siblings for lower-stakes jobs — e.g. `gpt-5.6-luna`
+  (verified working via `codex exec -m gpt-5.6-luna`) — pass `--model gpt-5.6-luna` when you don't
+  need the default tier.
 - **fast_mode** (`--fast`, default off): sets Codex's `service_tier=fast` +
   `features.fast_mode=true` for that job's app-server process — ~1.5x speed at a higher credit
   rate (2.5x standard on GPT-5.6/5.5, 2x on GPT-5.4). It's a speed/cost tradeoff, independent of

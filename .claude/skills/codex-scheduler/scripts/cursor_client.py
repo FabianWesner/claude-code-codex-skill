@@ -30,12 +30,17 @@ _CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_
 # NO levels at all), so resolution is validated against the CLI's own model list rather than
 # assuming a family's shape.
 # Each effort maps to a chain of acceptable levels, best first. Families differ: Luna and Sol
-# offer `max`, Grok 4.6 stops at `xhigh`. Trying the chain in order means --effort ultra gets the
-# strongest level a family actually has instead of resolving to a model id that does not exist.
+# offer `max`, Grok 4.6 stops at `xhigh`. Trying the chain in order means --effort max/ultra gets
+# the strongest level a family actually has instead of resolving to a model id that does not
+# exist. `ultra` has no separate Cursor tier above `max` (Codex's own `ultra` reasoning level is
+# "max reasoning plus automatic task delegation" -- a Codex-only behavior, not a bigger id suffix),
+# so it resolves to the same chain as `max`.
 EFFORT_TO_LEVELS = {
     "low": ("low",),
     "medium": ("medium",),
+    "high": ("high",),
     "xhigh": ("xhigh", "high"),
+    "max": ("max", "xhigh", "high"),
     "ultra": ("max", "xhigh", "high"),
 }
 DEFAULT_MODEL_BASE = "composer-2.5"
