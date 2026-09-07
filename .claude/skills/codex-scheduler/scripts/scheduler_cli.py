@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -181,6 +182,13 @@ def validate_job_spec(spec):
         err(f"job '{spec['slug']}': sandbox must be one of {db.VALID_SANDBOX}")
     if spec.get("max_seconds") is not None and spec["max_seconds"] < 1:
         err(f"job '{spec['slug']}': max-seconds must be >= 1")
+    if spec.get("goal_objective") and engine != "codex":
+        err(f"job '{spec['slug']}': --goal/--goal-file needs the codex engine "
+            f"(cursor-agent has no thread goal)")
+    if spec.get("goal_budget") is not None and spec["goal_budget"] < 1:
+        err(f"job '{spec['slug']}': --goal-budget must be >= 1")
+    if spec.get("goal_max_turns") is not None and spec["goal_max_turns"] < 1:
+        err(f"job '{spec['slug']}': --goal-max-turns must be >= 1")
     if spec.get("result_schema"):
         try:
             json.loads(spec["result_schema"])
@@ -249,8 +257,10 @@ def insert_job(conn, session_id, spec):
     cur = conn.execute(
         """INSERT INTO jobs (slug, prompt, workspace, model, effort, fast_mode, sandbox,
                               claude_session_id, priority, result_schema, cite_mode, max_seconds,
-                              engine)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              engine, resume_thread_id, resume_from_slug,
+                              goal_objective, goal_budget, goal_max_turns, goal_set_on_start,
+                              worktree_path, worktree_branch)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             spec["slug"], spec["prompt"], spec["workspace"],
             spec.get("model") or db.DEFAULT_MODEL[spec.get("engine") or "codex"],
@@ -259,6 +269,10 @@ def insert_job(conn, session_id, spec):
             session_id, spec.get("priority", 0),
             spec.get("result_schema"), 1 if spec.get("cite") else 0, spec.get("max_seconds"),
             spec.get("engine") or "codex",
+            spec.get("resume_thread_id"), spec.get("resume_from_slug"),
+            spec.get("goal_objective"), spec.get("goal_budget"), spec.get("goal_max_turns"),
+            0 if spec.get("goal_set_on_start") == 0 else 1,
+            spec.get("worktree_path"), spec.get("worktree_branch"),
         ),
     )
     return cur.lastrowid
@@ -301,6 +315,24 @@ def validate_cursor_model(spec):
         f"  available in the '{family}' family: {', '.join(near) or '(none)'}")
 
 
+def load_goal_arg(args):
+    """--goal-file <path> or --goal "<text>". The goal is the finish line; the prompt file stays
+    the requirements."""
+    gf = getattr(args, "goal_file", None)
+    inline = getattr(args, "goal", None)
+    if gf and inline:
+        err("--goal and --goal-file are mutually exclusive")
+    if gf:
+        if not os.path.exists(gf):
+            err(f"--goal-file '{gf}' not found")
+        with open(gf) as f:
+            text = f.read().strip()
+        if not text:
+            err(f"--goal-file '{gf}' is empty")
+        return text
+    return (inline or "").strip() or None
+
+
 def load_schema_arg(val):
     """--schema takes either inline JSON or a path to a .json file."""
     if not val:
@@ -311,7 +343,197 @@ def load_schema_arg(val):
     return val
 
 
+# ---------------------------------------------------------------- worktrees
+
+def _git(cwd, *args, check=True):
+    r = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        err(f"git {' '.join(args)} failed in {cwd}: {(r.stderr or r.stdout).strip()}")
+    return r
+
+
+def worktree_root(workspace):
+    return os.path.join(workspace, ".claude", "worktrees")
+
+
+def worktree_path_for(workspace, slug):
+    return os.path.join(worktree_root(workspace), slug)
+
+
+def _rewrite_env_for_worktree(src_env, dst_env, worktree):
+    """Copy .env, repointing a sqlite DB_DATABASE at the worktree's own database file so a lane
+    cannot write to the main checkout's database."""
+    sqlite_target = None
+    out = []
+    with open(src_env) as f:
+        for line in f:
+            if line.startswith("DB_DATABASE=") and ".sqlite" in line:
+                sqlite_target = os.path.join(worktree, "database", "database.sqlite")
+                out.append(f"DB_DATABASE={sqlite_target}\n")
+            else:
+                out.append(line)
+    with open(dst_env, "w") as f:
+        f.writelines(out)
+    return sqlite_target
+
+
+def prepare_worktree(workspace, slug, symlinks=True):
+    """Create (or reuse) <workspace>/.claude/worktrees/<slug> on branch lane/<slug>, based on the
+    current main HEAD, and make it runnable: vendor/node_modules symlinked from the main checkout,
+    .env copied with a per-worktree sqlite path, and the main sqlite database copied to it.
+
+    Nothing here is ever deleted automatically -- `worktree-remove <slug>` is explicit on purpose.
+    Returns (path, branch, [lines describing what was prepared])."""
+    if not os.path.isdir(os.path.join(workspace, ".git")) and \
+            _git(workspace, "rev-parse", "--git-dir", check=False).returncode != 0:
+        err(f"--worktree: '{workspace}' is not a git repository")
+    path = worktree_path_for(workspace, slug)
+    branch = f"lane/{slug}"
+    notes = []
+    if os.path.isdir(path):
+        notes.append(f"worktree already existed: {path}")
+    else:
+        os.makedirs(worktree_root(workspace), exist_ok=True)
+        base = "main"
+        if _git(workspace, "rev-parse", "--verify", "main", check=False).returncode != 0:
+            base = "HEAD"
+        have_branch = _git(workspace, "rev-parse", "--verify", branch, check=False).returncode == 0
+        if have_branch:
+            _git(workspace, "worktree", "add", path, branch)
+            notes.append(f"worktree {path} on existing branch {branch}")
+        else:
+            _git(workspace, "worktree", "add", "-b", branch, path, base)
+            notes.append(f"worktree {path} on new branch {branch} from {base}")
+    if not symlinks:
+        notes.append("--no-symlinks: vendor/node_modules/.env not prepared")
+        return path, branch, notes
+    for name in ("vendor", "node_modules"):
+        src, dst = os.path.join(workspace, name), os.path.join(path, name)
+        if os.path.exists(dst) or not os.path.exists(src):
+            continue
+        try:
+            os.symlink(src, dst)
+            notes.append(f"symlinked {name} -> {src}")
+        except OSError as e:
+            notes.append(f"could not symlink {name}: {e}")
+    src_env, dst_env = os.path.join(workspace, ".env"), os.path.join(path, ".env")
+    if os.path.exists(src_env) and not os.path.exists(dst_env):
+        target = _rewrite_env_for_worktree(src_env, dst_env, path)
+        notes.append(".env copied" + (f" (DB_DATABASE -> {target})" if target else ""))
+        if target:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            src_db = os.path.join(workspace, "database", "database.sqlite")
+            if os.path.exists(src_db) and not os.path.exists(target):
+                shutil.copyfile(src_db, target)
+                notes.append(f"copied database.sqlite -> {target}")
+            elif not os.path.exists(target):
+                open(target, "a").close()
+                notes.append(f"created empty {target}")
+    return path, branch, notes
+
+
+def cmd_worktree_list(args):
+    workspace = os.path.abspath(args.workspace)
+    conn = db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT slug, status, worktree_path, worktree_branch FROM jobs "
+            "WHERE worktree_path IS NOT NULL AND worktree_path != '' ORDER BY id ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    by_path = {}
+    for r in rows:
+        by_path.setdefault(r["worktree_path"], []).append(f"{r['slug']}({r['status']})")
+    root = worktree_root(workspace)
+    print(f"git worktrees registered in {workspace}:")
+    print(_git(workspace, "worktree", "list").stdout.rstrip() or "(none)")
+    print(f"\nscheduler lane worktrees under {root}:")
+    if not by_path:
+        print("(none)")
+        return
+    for path, jobs in by_path.items():
+        exists = "present" if os.path.isdir(path) else "MISSING on disk"
+        print(f"  {path}  [{exists}]  jobs: {', '.join(jobs)}")
+
+
+def cmd_worktree_remove(args):
+    workspace = os.path.abspath(args.workspace)
+    path = worktree_path_for(workspace, args.slug)
+    conn = db.connect()
+    try:
+        active = conn.execute(
+            "SELECT slug FROM jobs WHERE worktree_path=? AND status IN ('queued','running')",
+            (path,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if active and not args.force:
+        err(f"worktree {path} is still in use by: {', '.join(a['slug'] for a in active)} "
+            f"(pass --force to remove it anyway)")
+    if not os.path.isdir(path):
+        err(f"no worktree at {path}")
+    argv = ["worktree", "remove", path] + (["--force"] if args.force else [])
+    _git(workspace, *argv)
+    print(f"removed worktree {path} (branch lane/{args.slug} kept -- delete it yourself if you "
+          f"no longer want it)")
+
+
 # ---------------------------------------------------------------- submit / submit-batch
+
+def resolve_resume(conn, args, spec):
+    """Fill spec['resume_thread_id'] / ['resume_from_slug'] from --resume-from / --resume-thread.
+
+    --resume-from <slug> looks the job up in the SAME Claude session and requires it to be
+    terminal with a known Codex thread id; the new job then continues that thread (context and
+    prompt cache preserved) instead of starting a fresh one. --resume-thread takes a raw thread id
+    for the case where the source job is not in this scheduler DB."""
+    thread_id = (getattr(args, "resume_thread", None) or "").strip()
+    src_slug = (getattr(args, "resume_from", None) or "").strip()
+    if thread_id and src_slug:
+        err("--resume-from and --resume-thread are mutually exclusive")
+    if not thread_id and not src_slug:
+        return
+    if (spec.get("engine") or "codex") != "codex":
+        err("--resume-from/--resume-thread only work with the codex engine "
+            "(cursor-agent has no resumable thread)")
+    if src_slug:
+        src = db.find_job_by_slug(conn, src_slug)
+        if not src:
+            err(f"--resume-from: no job with slug '{src_slug}'")
+        if src["claude_session_id"] != args.session:
+            err(f"--resume-from: job '{src_slug}' belongs to session "
+                f"{src['claude_session_id']}, not {args.session}")
+        if src["status"] not in db.TERMINAL_STATUSES:
+            err(f"--resume-from: job '{src_slug}' is {src['status']}; it must have finished "
+                f"(done/failed/stopped) before another job can continue its thread")
+        if (src.get("engine") or "codex") != "codex":
+            err(f"--resume-from: job '{src_slug}' ran on the "
+                f"'{src.get('engine')}' engine and has no resumable Codex thread")
+        thread_id = (src.get("thread_id") or "").strip()
+        if not thread_id:
+            err(f"--resume-from: job '{src_slug}' has no recorded thread id "
+                f"(it never reached the app-server, so there is nothing to resume)")
+    spec["resume_thread_id"] = thread_id
+    spec["resume_from_slug"] = src_slug or None
+    if not src_slug:
+        return
+    # A follow-up inherits the source lane's worktree unless this submit asked for one itself:
+    # continuing a thread whose files live in a worktree only makes sense in that same worktree.
+    if src.get("worktree_path") and not spec.get("worktree_path"):
+        if not os.path.isdir(src["worktree_path"]):
+            err(f"--resume-from: job '{src_slug}' ran in worktree {src['worktree_path']}, "
+                f"which no longer exists; recreate it or pass --worktree")
+        spec["worktree_path"] = src["worktree_path"]
+        spec["worktree_branch"] = src.get("worktree_branch")
+    # An inherited goal is READ from the thread, never re-set -- unless this submit gave a new
+    # --goal/--goal-file, in which case the new objective replaces it.
+    if src.get("goal_objective") and not spec.get("goal_objective"):
+        spec["goal_objective"] = src["goal_objective"]
+        spec["goal_budget"] = src.get("goal_budget")
+        spec["goal_max_turns"] = spec.get("goal_max_turns") or src.get("goal_max_turns")
+        spec["goal_set_on_start"] = 0
+
 
 def cmd_submit(args):
     prompt = args.prompt
@@ -324,10 +546,18 @@ def cmd_submit(args):
         "sandbox": args.sandbox, "priority": args.priority,
         "result_schema": load_schema_arg(args.schema), "cite": args.cite,
         "max_seconds": args.max_seconds, "engine": args.engine,
+        "goal_objective": load_goal_arg(args), "goal_budget": args.goal_budget,
+        "goal_max_turns": args.goal_max_turns,
     }
     validate_job_spec(spec)
+    worktree_notes = []
+    if args.worktree:
+        wt, branch, worktree_notes = prepare_worktree(
+            spec["workspace"], spec["slug"], symlinks=not args.no_symlinks)
+        spec["worktree_path"], spec["worktree_branch"] = wt, branch
     conn = db.connect()
     try:
+        resolve_resume(conn, args, spec)
         try:
             existing = db.find_job_by_slug(conn, spec["slug"], active_only=True)
             if existing:
@@ -363,7 +593,20 @@ def cmd_submit(args):
         extras.append("cite")
     if spec.get("max_seconds"):
         extras.append(f"budget={spec['max_seconds']}s")
+    if spec.get("resume_thread_id"):
+        extras.append(f"resumes {spec.get('resume_from_slug') or 'thread'} "
+                      f"({spec['resume_thread_id']})")
+    if spec.get("goal_objective"):
+        extras.append("goal" + (":inherited" if spec.get("goal_set_on_start") == 0 else "")
+                      + (f" budget={spec['goal_budget']:,}" if spec.get("goal_budget") else "")
+                      + f" max-turns={spec.get('goal_max_turns') or 12}")
+    if spec.get("worktree_path"):
+        extras.append(f"worktree={spec['worktree_path']}")
     print(f"submitted job #{job_id} ({spec['slug']}) [{', '.join(extras)}]")
+    for n in worktree_notes:
+        print(f"  worktree: {n}")
+    if spec.get("goal_objective"):
+        print(f"  goal: {spec['goal_objective'].strip()[:300]}")
     report_watcher_status(args.session)
 
 
@@ -386,6 +629,16 @@ def cmd_submit_batch(args):
         spec.setdefault("priority", 0)
         spec.setdefault("sandbox", "workspace-write")
         spec.setdefault("engine", "codex")
+        if spec.get("goal_file") and not spec.get("goal_objective"):
+            gf = spec["goal_file"]
+            if not os.path.isabs(gf):
+                gf = os.path.join(base_dir, gf)
+            if not os.path.exists(gf):
+                err(f"job '{spec.get('slug')}': goal_file '{gf}' not found")
+            with open(gf) as gff:
+                spec["goal_objective"] = gff.read().strip()
+        if spec.get("goal") and not spec.get("goal_objective"):
+            spec["goal_objective"] = str(spec["goal"]).strip()
         if spec.get("schema") and not spec.get("result_schema"):
             # a batch spec may give `schema` as an inline object, a JSON string, or a file path
             spec["result_schema"] = (
@@ -406,6 +659,20 @@ def cmd_submit_batch(args):
                     err(f"slug '{slug}' is already queued/running (job #{existing['id']})")
             batch_map = {}
             for spec in specs:
+                if spec.get("resume_from") or spec.get("resume_thread"):
+                    # same rules as `submit --resume-from`; a batch spec expresses it as
+                    # "resume_from": "<slug>" (or "resume_thread": "<thread id>")
+                    resume_args = argparse.Namespace(
+                        session=args.session, resume_from=spec.get("resume_from"),
+                        resume_thread=spec.get("resume_thread"))
+                    resolve_resume(conn, resume_args, spec)
+                if spec.get("worktree"):
+                    wt, br, notes = prepare_worktree(
+                        spec["workspace"], spec["slug"],
+                        symlinks=not spec.get("no_symlinks"))
+                    spec["worktree_path"], spec["worktree_branch"] = wt, br
+                    for n in notes:
+                        print(f"  worktree ({spec['slug']}): {n}")
                 batch_map[spec["slug"]] = insert_job(conn, args.session, spec)
             for spec in specs:
                 job_id = batch_map[spec["slug"]]
@@ -438,19 +705,41 @@ def cmd_list(args):
         if not jobs:
             print("(no jobs)")
             return
-        widths = {"id": 4, "slug": 20, "status": 9, "effort": 6, "sandbox": 18, "session": 12, "workspace": 30}
+        widths = {"id": 4, "slug": 20, "status": 9, "effort": 6, "sandbox": 18, "session": 12, "thread": 22, "goal": 16, "workspace": 30}
         header = f"{'ID':<{widths['id']}} {'SLUG':<{widths['slug']}} {'STATUS':<{widths['status']}} " \
                  f"{'EFFORT':<{widths['effort']}} {'SANDBOX':<{widths['sandbox']}} " \
-                 f"{'SESSION':<{widths['session']}} WORKSPACE"
+                 f"{'SESSION':<{widths['session']}} {'THREAD':<{widths['thread']}} " \
+                 f"{'GOAL':<{widths['goal']}} WORKSPACE"
         print(header)
+        # A resumed job continues the Codex thread of an earlier job (same context, same cache).
+        # THREAD shows the root slug of that lineage so "e16-epic-2" reads as "same session as e16-epic".
+        by_slug = {j["slug"]: j for j in jobs}
+        def lineage_root(job):
+            seen = set()
+            while job.get("resume_from_slug") and job["resume_from_slug"] in by_slug and job["slug"] not in seen:
+                seen.add(job["slug"])
+                job = by_slug[job["resume_from_slug"]]
+            return job
         for j in jobs:
             deps = db.get_deps(conn, j["id"])
             dep_str = "" if not deps else f" deps=[{','.join(d['slug'] for d in deps)}]"
+            if j.get("resume_thread_id"):
+                root = lineage_root(j)
+                thread = f"= {root['slug']}" if root["slug"] != j["slug"] else f"= {j.get('resume_from_slug') or 'thread'}"
+            else:
+                thread = "new"
+            if j.get("goal_objective"):
+                goal = f"goal:{j.get('goal_status') or 'pending'}"
+                if j.get("goal_turns"):
+                    goal += f"/{j['goal_turns']}t"
+            else:
+                goal = "-"
             print(
                 f"{j['id']:<{widths['id']}} {j['slug']:<{widths['slug']}} {j['status']:<{widths['status']}} "
                 f"{j['effort']:<{widths['effort']}} {j['sandbox']:<{widths['sandbox']}} "
-                f"{j['claude_session_id'][:12]:<{widths['session']}} "
-                f"{j['workspace']}{dep_str}"
+                f"{j['claude_session_id'][:12]:<{widths['session']}} {thread[:widths['thread']]:<{widths['thread']}} "
+                f"{goal[:widths['goal']]:<{widths['goal']}} "
+                f"{j.get('worktree_path') or j['workspace']}{dep_str}"
             )
     finally:
         conn.close()
@@ -474,6 +763,20 @@ def cmd_show(args):
     finally:
         conn.close()
     print(json.dumps(job, indent=2))
+    if job.get("resume_thread_id"):
+        print(f"\nresumed from: {job.get('resume_from_slug') or '(thread id given directly)'} "
+              f"(thread {job['resume_thread_id']})")
+    if job.get("goal_objective"):
+        print("\ngoal:")
+        print(f"  objective: {job['goal_objective'].strip()}")
+        print(f"  status:    {job.get('goal_status') or '(not reported yet)'}")
+        print(f"  tokens:    {job.get('goal_tokens_used') or 0:,}"
+              + (f" / {job['goal_budget']:,} budget" if job.get("goal_budget") else " (no budget)"))
+        print(f"  time used: {job.get('goal_time_used_seconds') or 0}s")
+        print(f"  turns:     {job.get('goal_turns') or 0} of max {job.get('goal_max_turns') or 12}")
+    if job.get("worktree_path"):
+        print(f"\nworktree: {job['worktree_path']} (branch {job.get('worktree_branch')}) "
+              f"[{'present' if os.path.isdir(job['worktree_path']) else 'MISSING'}]")
     if deps:
         print("\ndeps:")
         for d in deps:
@@ -544,7 +847,8 @@ def cmd_wait(args):
             # another waiter marks one notified in the meantime it can never reappear here, so the
             # set never completes and the wait blocks forever. Naming a slug means "tell me about
             # this job", regardless of who else was told.
-            q = "SELECT * FROM jobs WHERE claude_session_id=? AND status IN ('done','failed','stopped')"
+            terminal_in = ",".join(f"'{st}'" for st in db.TERMINAL_STATUSES)
+            q = f"SELECT * FROM jobs WHERE claude_session_id=? AND status IN ({terminal_in})"
             args_l = [args.session]
             if slugs:
                 q += f" AND slug IN ({','.join('?' * len(slugs))})"
@@ -671,6 +975,15 @@ def _job_payload(job):
             "total": job.get("tokens_total"), "context_window": job.get("context_window"),
         },
     }
+    if job.get("goal_objective"):
+        out["goal"] = {
+            "objective": job.get("goal_objective"), "status": job.get("goal_status"),
+            "tokens_used": job.get("goal_tokens_used"), "budget": job.get("goal_budget"),
+            "time_used_seconds": job.get("goal_time_used_seconds"),
+            "turns": job.get("goal_turns"), "max_turns": job.get("goal_max_turns"),
+        }
+    if job.get("worktree_path"):
+        out["worktree"] = {"path": job.get("worktree_path"), "branch": job.get("worktree_branch")}
     if job.get("result_schema"):
         out["schema_error"] = job.get("schema_error")
         try:
@@ -972,7 +1285,15 @@ def _print_result(job, as_json=False):
     tok = _fmt_tokens(job)
     if tok:
         print(f"[tokens] {tok}")
-    if job["status"] == "done":
+    if job.get("goal_objective"):
+        print(f"[goal] {job.get('goal_status') or 'unknown'} after "
+              f"{job.get('goal_turns') or 0} turn(s), "
+              f"{job.get('goal_tokens_used') or 0:,} tokens"
+              + (f" of {job['goal_budget']:,}" if job.get("goal_budget") else ""))
+    if job["status"] == "blocked":
+        print("BLOCKED: the goal reported `blocked` -- it needs a human decision.")
+        print(job.get("result") or "(empty result)")
+    elif job["status"] == "done":
         if job.get("schema_error"):
             print(f"[schema] MISMATCH: {job['schema_error']} -- raw result below, result_json is null")
         elif job.get("result_json"):
@@ -1192,7 +1513,37 @@ def build_parser():
                          "(file:line, URL + quote, or command + output)")
     s.add_argument("--max-seconds", type=int, dest="max_seconds",
                     help="stop the job once it has run this long; its last checkpoint survives")
+    s.add_argument("--resume-from", dest="resume_from", default=None,
+                    help="slug of a FINISHED job in this session whose Codex thread this job "
+                         "continues, keeping its context and prompt cache")
+    s.add_argument("--goal", default=None,
+                   help="thread goal (the finish line) as inline text; the prompt stays the "
+                        "requirements. Turns continue automatically until the goal completes.")
+    s.add_argument("--goal-file", dest="goal_file", default=None,
+                   help="read the thread goal from a file (mutually exclusive with --goal)")
+    s.add_argument("--goal-budget", dest="goal_budget", type=int, default=None,
+                   help="token budget for the goal; exceeding it settles the job with a note")
+    s.add_argument("--goal-max-turns", dest="goal_max_turns", type=int, default=None,
+                   help="stop continuing an active goal after N turns (default 12)")
+    s.add_argument("--worktree", action="store_true",
+                   help="run this job in a git worktree at <workspace>/.claude/worktrees/<slug> "
+                        "on branch lane/<slug>, created from the current main HEAD")
+    s.add_argument("--no-symlinks", dest="no_symlinks", action="store_true",
+                   help="with --worktree: skip vendor/node_modules symlinks and the .env copy")
+    s.add_argument("--resume-thread", dest="resume_thread", default=None,
+                    help="raw Codex thread id to continue (alternative to --resume-from)")
     s.set_defaults(func=cmd_submit)
+
+    s = sub.add_parser("worktree-list", help="lane worktrees known to git and to the scheduler")
+    s.add_argument("--workspace", required=True)
+    s.set_defaults(func=cmd_worktree_list)
+
+    s = sub.add_parser("worktree-remove", help="remove one lane worktree (never automatic)")
+    s.add_argument("slug")
+    s.add_argument("--workspace", required=True)
+    s.add_argument("--force", action="store_true",
+                   help="remove even with a queued/running job in it, or with local changes")
+    s.set_defaults(func=cmd_worktree_remove)
 
     s = sub.add_parser("submit-batch")
     s.add_argument("--session", required=True)

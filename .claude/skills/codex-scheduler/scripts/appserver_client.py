@@ -46,6 +46,14 @@ SENTINEL_RE = re.compile(
     re.S | re.M,
 )
 
+# Fixed nudge used to open each follow-up turn of a goal job. Deliberately short and constant:
+# the goal itself carries the intent, so a per-turn instruction would only dilute it.
+GOAL_NUDGE = "Continue toward the goal. Report what is verified so far."
+# How long to wait after a turn completes before starting the next one ourselves. If the
+# app-server drives the goal loop on its own it emits `turn/started` inside this window and we
+# stand down, so the two mechanisms cannot double-start a turn.
+GOAL_AUTOTURN_GRACE_SECONDS = 8.0
+
 _CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_cli.py")
 
 NOTIFY_PREAMBLE = (
@@ -96,10 +104,23 @@ SCHEMA_PREAMBLE = (
 )
 
 
+GOAL_PREAMBLE = (
+    "[scheduler] GOAL MODE. This thread carries a goal, and the goal is the finish line -- not "
+    "the end of this one turn:\n"
+    "  {objective}\n"
+    "The prompt below carries the requirements and constraints; the goal above says when you are "
+    "actually done. Keep working across turns until the goal is genuinely met and verified. When "
+    "it is met, say so explicitly and stop. If you are blocked on something only a human can "
+    "resolve, say BLOCKED and what you need, rather than inventing a way around it.\n\n"
+)
+
+
 def build_preamble(job, cli_path):
     """Assemble the per-job instruction block prepended to the user's prompt."""
     slug = job["slug"]
     parts = [NOTIFY_PREAMBLE.format(slug=slug, cli=cli_path)]
+    if job.get("goal_objective"):
+        parts.append(GOAL_PREAMBLE.format(objective=job["goal_objective"].strip()))
     if job.get("max_seconds") or job.get("effort") in ("xhigh", "ultra"):
         parts.append(CHECKPOINT_PREAMBLE.format(slug=slug, cli=cli_path))
     if job.get("cite_mode"):
@@ -176,13 +197,23 @@ class JobSession:
     """
 
     def __init__(self, job, on_done, on_tokens=None, on_ask_answer=None,
-                 on_checkpoint=None, on_message=None):
+                 on_checkpoint=None, on_message=None, on_goal=None):
         self.job = job
         self.on_done = on_done
         self.on_tokens = on_tokens          # (job, tokenUsage dict) -> None
         self.on_ask_answer = on_ask_answer  # (job, ask_id, answer_text) -> None
         self.on_checkpoint = on_checkpoint  # (job, text) -> None
         self.on_message = on_message        # (job, text) -> None
+        self.on_goal = on_goal              # (job, ThreadGoal dict, turns) -> None
+        self.cwd = db.job_cwd(job)
+        # goal mode state
+        self.goal_objective = (job.get("goal_objective") or "").strip() or None
+        self.goal_active = False        # a goal is attached to this thread
+        self.goal_status = None
+        self.goal_turns = 0             # turns WE have started for this goal
+        self.goal_max_turns = int(job.get("goal_max_turns") or 12)
+        self._goal_timer = None
+        self._turn_seen_after_complete = False
         self.dir = db.job_dir(job["id"], job["slug"])
         os.makedirs(self.dir, exist_ok=True)
         self.ctl = os.path.join(self.dir, "control")
@@ -267,12 +298,19 @@ class JobSession:
 
     def _on_note(self, method, params, req_id):
         if method == "turn/started":
+            self._turn_seen_after_complete = True
             self.turn_id = (params.get("turn") or {}).get("id")
             self.buf, self.messages, self._cur_item = [], [], None
             self.log(f"[turn started id={self.turn_id}]")
         elif method and method.endswith("/delta") and "delta" in params:
             self.buf.append(params["delta"])
             self.logf.write(params["delta"])
+        elif method == "thread/goal/updated":
+            self._record_goal(params.get("goal") or {})
+        elif method == "thread/goal/cleared":
+            self.goal_active = False
+            self.goal_status = None
+            self.log("\n[goal cleared]")
         elif method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage") or {}
             tot = usage.get("total") or {}
@@ -312,7 +350,10 @@ class JobSession:
                 f"\n[turn complete -> result.txt, {len(final)} chars "
                 f"({len(self.messages)} agent message(s), last one is the result)]"
             )
-            self._settle("done", final)
+            if self.goal_active:
+                self._on_goal_turn_complete(final)
+            else:
+                self._settle("done", final)
         elif method == "turn/failed" or (params.get("error") and method and method.startswith("turn/")):
             self._flush_message()
             err = str(params.get("error") or "turn failed")
@@ -324,6 +365,101 @@ class JobSession:
                 self.conn._send({"id": req_id, "result": {}})
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------ goal mode
+
+    def _record_goal(self, goal):
+        """Persist a ThreadGoal payload and log the transition."""
+        if not goal:
+            return
+        prev = self.goal_status
+        self.goal_active = True
+        self.goal_status = goal.get("status")
+        if goal.get("objective"):
+            self.goal_objective = goal["objective"]
+        if self.goal_status != prev:
+            self.log(f"\n[goal {prev or '-'} -> {self.goal_status} "
+                     f"tokens={goal.get('tokensUsed')}/{goal.get('tokenBudget')} "
+                     f"time={goal.get('timeUsedSeconds')}s]")
+        if self.on_goal:
+            try:
+                self.on_goal(self.job, goal, self.goal_turns)
+            except Exception as e:  # noqa
+                self.log(f"[on_goal error: {e}]")
+
+    def _attach_goal(self):
+        """Called once the thread exists. Sets the goal when this job supplies one; otherwise
+        (a --resume-from that inherits a goal) reads the goal already on the thread so resuming
+        never resets it."""
+        set_it = self.goal_objective and self.job.get("goal_set_on_start", 1)
+        try:
+            if set_it:
+                params = {"threadId": self.thread, "objective": self.goal_objective,
+                          "status": "active"}
+                if self.job.get("goal_budget"):
+                    params["tokenBudget"] = int(self.job["goal_budget"])
+                r = self.conn.request("thread/goal/set", params, timeout=60)
+                self.log(f"[goal set budget={params.get('tokenBudget')}] {self.goal_objective[:160]}")
+                self._record_goal(r.get("goal") or {"status": "active",
+                                                    "objective": self.goal_objective})
+            else:
+                r = self.conn.request("thread/goal/get", {"threadId": self.thread}, timeout=60)
+                goal = r.get("goal")
+                if goal:
+                    self.log(f"[goal inherited from resumed thread] {str(goal.get('objective'))[:160]}")
+                    self._record_goal(goal)
+                else:
+                    self.log("[goal: none on the resumed thread; running as a plain job]")
+        except Exception as e:  # noqa
+            # A goal failure must not silently turn a goal job into a one-shot job.
+            self.log(f"[goal setup failed: {e}]")
+            raise
+
+    def _on_goal_turn_complete(self, final):
+        """A turn ended while a goal is attached. Terminal goal statuses settle the job; an
+        `active` goal continues in the same thread, unless the app-server continues it itself."""
+        st = self.goal_status
+        if st == "complete":
+            self.log("[goal complete -> job done]")
+            self._settle("done", final)
+            return
+        if st == "blocked":
+            self.log("[goal blocked -> job blocked]")
+            self._settle("blocked", final)
+            return
+        if st in ("usageLimited", "budgetLimited"):
+            note = ("goal stopped: the account usage limit was reached before the goal was met"
+                    if st == "usageLimited" else
+                    "goal stopped: the token budget was exhausted before the goal was met")
+            self.log(f"[goal {st} -> job done with a note]")
+            self._settle("done", f"[{note}]\n\n{final}")
+            return
+        if st == "paused":
+            self.log("[goal paused -> job done (paused goals are not auto-continued)]")
+            self._settle("done", f"[goal paused before completion]\n\n{final}")
+            return
+        # status is active (or unknown): keep going in the same thread.
+        if self.goal_turns >= self.goal_max_turns:
+            self.log(f"[goal still active after {self.goal_turns} turns "
+                     f"(--goal-max-turns {self.goal_max_turns}) -> job done]")
+            self._settle("done",
+                         f"[goal not reached within --goal-max-turns {self.goal_max_turns}; "
+                         f"goal status is still '{st}']\n\n{final}")
+            return
+        self._turn_seen_after_complete = False
+        self._goal_timer = threading.Timer(GOAL_AUTOTURN_GRACE_SECONDS, self._continue_goal)
+        self._goal_timer.daemon = True
+        self._goal_timer.start()
+
+    def _continue_goal(self):
+        """Start the next goal turn ourselves -- unless the app-server already started one."""
+        if self._settled:
+            return
+        if self._turn_seen_after_complete or self.turn_id:
+            self.log("[goal: app-server started the next turn itself; not double-starting]")
+            return
+        self.log(f"[goal: starting turn {self.goal_turns + 1}/{self.goal_max_turns} with the nudge]")
+        self._start_turn_rpc(GOAL_NUDGE)
 
     def _settle(self, status, text):
         if self._settled:
@@ -342,21 +478,48 @@ class JobSession:
             )
             self.conn.notify("initialized")
             sb = SANDBOX_MAP.get(self.job.get("sandbox", "workspace-write"), SANDBOX_MAP["workspace-write"])
-            th = self.conn.request(
-                "thread/start", {"cwd": self.job["workspace"], "approvalPolicy": "never"}, timeout=60
-            )
-            self.thread = (th.get("thread") or {}).get("id")
+            resume_id = (self.job.get("resume_thread_id") or "").strip()
+            if resume_id:
+                # `thread/resume` (verified against `codex app-server generate-json-schema`:
+                # ThreadResumeParams requires `threadId`, optionally takes `cwd`/`approvalPolicy`,
+                # and returns the same `{thread: {id}}` shape as thread/start). Resuming loads the
+                # rollout from disk, so the model keeps the previous turn's context and its prompt
+                # cache. A failure here is fatal for the job on purpose: silently falling back to a
+                # fresh thread would look like success while losing exactly what was asked for.
+                th = self.conn.request(
+                    "thread/resume",
+                    {"threadId": resume_id, "cwd": self.cwd, "approvalPolicy": "never"},
+                    timeout=120,
+                )
+            else:
+                th = self.conn.request(
+                    "thread/start", {"cwd": self.cwd, "approvalPolicy": "never"}, timeout=60
+                )
+            self.thread = (th.get("thread") or {}).get("id") or (resume_id or None)
             self.log(
-                f"[READY thread={self.thread} model={self.job.get('model')} "
-                f"sandbox={self.job.get('sandbox')} fast={bool(self.job.get('fast_mode'))}]"
+                f"[READY thread={self.thread} cwd={self.cwd} model={self.job.get('model')} "
+                f"sandbox={self.job.get('sandbox')} fast={bool(self.job.get('fast_mode'))}"
+                f"{' resumed=' + resume_id if resume_id else ''}]"
             )
             self._write_status()
+            if self.goal_objective or not self.job.get("goal_set_on_start", 1):
+                self._attach_goal()
             full_prompt = build_preamble(self.job, _CLI_PATH) + prompt
+            self._start_turn_rpc(full_prompt)
+        except Exception as e:  # noqa
+            self.log(f"[start_turn error: {e}]")
+            self._settle("failed", f"failed to start turn: {e}")
+
+    def _start_turn_rpc(self, text):
+        """One turn/start call. Used for the first turn and for every goal-mode continuation."""
+        sb = SANDBOX_MAP.get(self.job.get("sandbox", "workspace-write"),
+                             SANDBOX_MAP["workspace-write"])
+        try:
             r = self.conn.request(
                 "turn/start",
                 {
                     "threadId": self.thread,
-                    "input": [{"type": "text", "text": full_prompt}],
+                    "input": [{"type": "text", "text": text}],
                     "model": self.job.get("model") or "gpt-5.6-sol",
                     "effort": self.job.get("effort") or "medium",
                     "sandboxPolicy": sb,
@@ -364,8 +527,15 @@ class JobSession:
                 timeout=60,
             )
             self.turn_id = (r.get("turn") or {}).get("id")
+            if self.goal_active:
+                self.goal_turns += 1
+                if self.on_goal:
+                    try:
+                        self.on_goal(self.job, None, self.goal_turns)
+                    except Exception:  # noqa
+                        pass
         except Exception as e:  # noqa
-            self.log(f"[start_turn error: {e}]")
+            self.log(f"[turn/start failed: {e}]")
             self._settle("failed", f"failed to start turn: {e}")
 
     def steer(self, text):

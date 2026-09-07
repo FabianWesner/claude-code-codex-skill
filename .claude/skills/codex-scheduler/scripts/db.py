@@ -20,7 +20,9 @@ DAEMON_LOCKFILE = os.path.join(STATE_DIR, "daemon.lock")
 DAEMON_LOG = os.path.join(STATE_DIR, "daemon.log")
 DRAIN_MARKER = os.path.join(STATE_DIR, "drain")
 
-TERMINAL_STATUSES = ("done", "failed", "stopped")
+# 'blocked' is a goal-mode terminal status: the thread's goal reported `blocked`, so the job is
+# finished but explicitly NOT successful -- it needs a human decision, not a retry.
+TERMINAL_STATUSES = ("done", "failed", "stopped", "blocked")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -59,7 +61,19 @@ CREATE TABLE IF NOT EXISTS jobs (
   tokens_reasoning INTEGER,
   tokens_total INTEGER,
   context_window INTEGER,
-  engine TEXT NOT NULL DEFAULT 'codex'
+  engine TEXT NOT NULL DEFAULT 'codex',
+  resume_thread_id TEXT,
+  resume_from_slug TEXT,
+  goal_objective TEXT,
+  goal_budget INTEGER,
+  goal_max_turns INTEGER,
+  goal_set_on_start INTEGER NOT NULL DEFAULT 1,
+  goal_status TEXT,
+  goal_tokens_used INTEGER,
+  goal_time_used_seconds INTEGER,
+  goal_turns INTEGER NOT NULL DEFAULT 0,
+  worktree_path TEXT,
+  worktree_branch TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_slug ON jobs(slug) WHERE status IN ('queued','running');
 CREATE INDEX IF NOT EXISTS jobs_session ON jobs(claude_session_id);
@@ -110,7 +124,7 @@ INSERT OR IGNORE INTO config(id) VALUES (1);
 # ~/.codex/models_cache.json and a live `codex exec` call for every level, 2026-09-04).
 VALID_EFFORT = ("low", "medium", "high", "xhigh", "max", "ultra")
 VALID_SANDBOX = ("read-only", "workspace-write", "danger-full-access")
-VALID_STATUS = ("queued", "running", "done", "failed", "stopped")
+VALID_STATUS = ("queued", "running", "done", "failed", "stopped", "blocked")
 # Which agent CLI runs the job. 'codex' drives `codex app-server` over JSON-RPC;
 # 'cursor' drives `cursor-agent -p --output-format stream-json` as a one-shot subprocess.
 VALID_ENGINE = ("codex", "cursor")
@@ -142,6 +156,24 @@ _ADDED_COLUMNS = [
     ("jobs", "tokens_total", "INTEGER"),
     ("jobs", "context_window", "INTEGER"),
     ("jobs", "engine", "TEXT NOT NULL DEFAULT 'codex'"),
+    # `submit --resume-from/--resume-thread`: the Codex thread this job continues, and the slug of
+    # the job that thread came from (display only -- the thread id is what the client resumes).
+    ("jobs", "resume_thread_id", "TEXT"),
+    ("jobs", "resume_from_slug", "TEXT"),
+    # `submit --goal-file/--goal`: thread-level goal mode (thread/goal/set + thread/goal/updated).
+    # goal_set_on_start=0 means "this job resumes a thread that already carries a goal; read it
+    # with thread/goal/get instead of overwriting it".
+    ("jobs", "goal_objective", "TEXT"),
+    ("jobs", "goal_budget", "INTEGER"),
+    ("jobs", "goal_max_turns", "INTEGER"),
+    ("jobs", "goal_set_on_start", "INTEGER NOT NULL DEFAULT 1"),
+    ("jobs", "goal_status", "TEXT"),
+    ("jobs", "goal_tokens_used", "INTEGER"),
+    ("jobs", "goal_time_used_seconds", "INTEGER"),
+    ("jobs", "goal_turns", "INTEGER NOT NULL DEFAULT 0"),
+    # `submit --worktree`: the git worktree this job runs in (cwd) and the branch it sits on.
+    ("jobs", "worktree_path", "TEXT"),
+    ("jobs", "worktree_branch", "TEXT"),
 ]
 
 
@@ -320,6 +352,33 @@ def stop_job(conn, job, cause):
         except OSError:
             pass
     return "stopped" if updated else None
+
+
+def job_cwd(job):
+    """The directory a job actually runs in: its worktree when it has one, else its workspace.
+
+    `workspace` always stays the main checkout so `list`, `--resume-from` and the worktree
+    subcommands can find the repo the lane belongs to."""
+    return (job.get("worktree_path") or "").strip() or job["workspace"]
+
+
+def record_goal(conn, job_id, goal):
+    """Persist a ThreadGoal payload (from thread/goal/set, /get or the updated notification)."""
+    goal = goal or {}
+    conn.execute(
+        """UPDATE jobs SET goal_status=?, goal_tokens_used=?, goal_time_used_seconds=?,
+                            goal_objective=COALESCE(?, goal_objective),
+                            goal_budget=COALESCE(?, goal_budget)
+           WHERE id=?""",
+        (goal.get("status"), goal.get("tokensUsed"), goal.get("timeUsedSeconds"),
+         goal.get("objective"), goal.get("tokenBudget"), job_id),
+    )
+    conn.commit()
+
+
+def record_goal_turns(conn, job_id, turns):
+    conn.execute("UPDATE jobs SET goal_turns=? WHERE id=?", (turns, job_id))
+    conn.commit()
 
 
 def record_tokens(conn, job_id, usage):

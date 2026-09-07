@@ -127,7 +127,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 
 | command | purpose |
 |---|---|
-| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds]` | queue one job |
+| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds] [--resume-from <slug> \| --resume-thread <id>] [--goal "..." \| --goal-file f] [--goal-budget N] [--goal-max-turns N] [--worktree] [--no-symlinks]` | queue one job |
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
@@ -147,9 +147,136 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 | `ui [--port 1234]` | start/reuse the live dashboard (auto-started already, see below) |
 | `daemon start\|stop\|status` | manual daemon control (usually unnecessary — auto-started) |
 | `daemon stop --graceful [--timeout SECS]` | wait for running jobs to finish before stopping, instead of killing them (see Notes) |
+| `worktree-list --workspace <repo>` | lane worktrees, as git sees them and as the scheduler recorded them |
+| `worktree-remove <slug> --workspace <repo> [--force]` | remove one lane worktree (never automatic; refuses while a job still uses it) |
 
 `steer`/`stop`/`rm`/`edit`/`reorder` only act on the job's most recent **active** (queued/running)
 row for that slug — a slug can be reused once its earlier job is terminal.
+
+## Continuing a finished job
+
+**Rule (Fabian, 2026-09-07): a restarted, continued or corrected epic reuses the same Codex session.** Every follow-up turn on an epic is submitted with `--resume-from <previous slug of that epic>` (or `--resume-thread <id>`), never as a fresh job. A fresh job is only for different work, or when a second, independent opinion is wanted on purpose. `list` shows the lineage in the THREAD column: `= e16-epic` means the job runs in the same Codex session as `e16-epic`; `new` means a fresh session. The job id and slug change per turn, the thread does not.
+
+
+`submit --resume-from <slug>` starts a new job **inside the finished job's Codex thread** instead
+of a fresh one, so the model still has everything from that turn: what it read, what it decided,
+what it already wrote, plus the prompt cache behind it (the verification run's second job billed
+14.3k input tokens of which 13.1k were cached).
+
+```bash
+python3 $CLI submit --session <sid> --slug e12-s2 --workspace /path/to/repo \
+  --prompt-file slice2.md --resume-from e12-s1
+```
+
+Use it for the next chunk of the same epic, a correction to work a job just did, or a follow-up
+question about what it found. Reach for a fresh job instead when the task is unrelated — a long
+thread carries irrelevant context and costs tokens on every turn.
+
+- The source job must belong to the **same Claude session** and be **terminal** (`done`, `failed`
+  or `stopped`), and must have a recorded `thread_id`. Anything else is refused with the reason.
+- `--resume-thread <thread id>` does the same from a raw Codex thread id, for a thread this
+  scheduler's DB doesn't know about. The two flags are mutually exclusive.
+- The resumed job is a **normal job**: its own row, slug, log and result, so `list`, `show`,
+  `wait`, `steer` and `stop` behave exactly as usual. `show <slug>` prints
+  `resumed from: <slug> (thread …)`.
+- **The sandbox, model and cwd come from the thread you resume.** Codex re-applies the resumed
+  thread's own settings, so passing a different `--sandbox`/`--model` on the resuming job is not a
+  reliable way to change them — submit a fresh job if you need different ones.
+- **Context window limits still apply.** A resumed thread keeps growing and compacts itself when
+  it fills, so a very long chain gradually loses its earliest detail. For a long epic, prefer a
+  few resumed chunks over dozens.
+- Codex engine only — `--engine cursor` jobs have no resumable thread.
+- In a `submit-batch` file the same thing is `"resume_from": "<slug>"` (or
+  `"resume_thread": "<id>"`) on a job spec. The source must already be terminal at submit time, so
+  it cannot be another job in the same batch.
+
+Protocol note: this issues `thread/resume` (`{threadId, cwd, approvalPolicy}`) before the usual
+`turn/start`, confirmed against `codex app-server generate-json-schema` (`ThreadResumeParams`,
+codex-cli 0.153.4). If the resume fails the job fails with that error rather than quietly starting
+a fresh thread.
+
+## Goal mode
+
+**The goal is the finish line; the prompt file is the requirements.** A normal job ends when its
+one turn ends, whether or not the work is actually finished. A goal job carries a thread-level
+goal, keeps taking turns in the same thread, and ends when the *goal* is reached.
+
+```bash
+python3 $CLI submit --session <sid> --slug e12-epic --workspace /path/to/repo \
+  --prompt-file specs/e12/brief.md \
+  --goal-file specs/e12/goal.md --goal-budget 2000000 --goal-max-turns 12 \
+  --model gpt-6-astra --effort medium --sandbox danger-full-access
+```
+
+- `--goal-file <path>` (or `--goal "<text>"`, mutually exclusive) is the objective. Write it as a
+  *verifiable end state*, not a task list: "every slice of the spec is implemented and
+  `PAO_DISABLE=1 php artisan test tests/Feature tests/Unit` is back at the known baseline".
+- `--goal-budget <tokens>` is the thread's token budget. Running out settles the job rather than
+  letting it grind on.
+- `--goal-max-turns N` (default 12) caps how many turns the scheduler will let the goal run for.
+- Codex engine only. `--engine cursor` has no thread goal and the submit is refused.
+
+**What the status column means.** `list` shows `goal:<status>/<n>t` — the goal's status and the
+number of turns taken. The status vocabulary is the protocol's own
+(`ThreadGoalStatus`: `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`)
+and it maps to a job outcome like this:
+
+| goal status | job ends as | meaning |
+|---|---|---|
+| `active` | keeps running | another turn starts automatically in the same thread |
+| `complete` | `done` | the goal was reached; the last turn's message is the result |
+| `blocked` | **`blocked`** | it needs a human decision. Not a failure and not a success — read the result and either answer it with a `--resume-from` follow-up or change the plan |
+| `usageLimited` | `done` (with a note) | the account hit its usage limit before the goal was met |
+| `budgetLimited` | `done` (with a note) | `--goal-budget` was exhausted before the goal was met |
+| `paused` | `done` (with a note) | the goal was paused; the scheduler does not un-pause it |
+
+`blocked` is a real job status: `wait` returns on it like any other terminal status, and a queued
+dependent of a blocked job is failed the same way it would be for a failed dependency.
+
+`show <slug>` prints the objective, status, tokens used against the budget, wall time and turn
+count. `wait --json` carries the same under a `goal` key.
+
+**Who drives the turns.** Verified live (2026-09-07, codex-cli 0.153.4): the app-server *itself*
+starts the next turn while a goal is `active`. The scheduler waits 8 seconds after `turn/completed`
+and only starts a turn of its own if the app-server did not — the log line
+`[goal: app-server started the next turn itself; not double-starting]` is that guard firing.
+Turns the scheduler starts itself open with one fixed nudge,
+"Continue toward the goal. Report what is verified so far."
+
+**Resuming keeps the goal.** `--resume-from <slug>` on a goal job reads the goal already on the
+thread (`thread/goal/get`) instead of re-setting it, so the tokens and time already spent carry
+over. Passing a new `--goal-file`/`--goal` on the resuming job replaces the objective deliberately.
+
+Protocol: `thread/goal/set {threadId, objective, status, tokenBudget}` after `thread/start` /
+`thread/resume` and before `turn/start`; `thread/goal/updated` is persisted on every change.
+
+## Worktrees per epic
+
+`submit --worktree` runs the job in its own git worktree instead of the shared checkout, so two
+lanes on the same repo cannot overwrite each other's files.
+
+```bash
+python3 $CLI submit --session <sid> --slug e12-epic --workspace /Users/you/repo \
+  --prompt-file brief.md --worktree --sandbox danger-full-access
+```
+
+- The worktree is `<workspace>/.claude/worktrees/<slug>` on a new branch `lane/<slug>`, cut from
+  the current `main` HEAD (from `HEAD` if the repo has no `main`). An existing worktree or branch
+  of that name is reused, never recreated.
+- `workspace` on the job row stays the main checkout; `worktree_path` is what the job actually
+  runs in. `list` shows the worktree path in the WORKSPACE column and `show` prints the branch.
+- A fresh worktree is bare, so submit prepares it and prints what it did: `vendor` and
+  `node_modules` are **symlinked** from the main checkout when they exist there, `.env` is copied
+  with a sqlite `DB_DATABASE=` rewritten to `<worktree>/database/database.sqlite`, and the main
+  checkout's `database/database.sqlite` is copied to that path. `--no-symlinks` skips all of that.
+- `--resume-from` **inherits the source job's worktree**, so every turn of an epic lands in the
+  same tree. If that worktree has since been removed the submit is refused rather than silently
+  running in the main checkout.
+- **Nothing is ever removed automatically.** `worktree-list --workspace <repo>` shows what exists;
+  `worktree-remove <slug> --workspace <repo>` removes one (refusing while a queued/running job
+  still uses it, unless `--force`). The `lane/<slug>` branch is always kept — delete it yourself.
+- In a `submit-batch` file: `"worktree": true` (and `"no_symlinks": true`) on a job spec.
+- Merging is yours: the lane commits on `lane/<slug>`, and you review and merge it into `main`.
 
 ## Getting output you can act on
 

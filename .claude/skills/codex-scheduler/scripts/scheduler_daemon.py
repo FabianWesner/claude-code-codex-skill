@@ -25,7 +25,7 @@ import appserver_client
 import cursor_client
 
 TICK_SECONDS = 2.0
-_hooks = {"tokens": None, "ask": None, "checkpoint": None, "message": None}
+_hooks = {"tokens": None, "ask": None, "checkpoint": None, "message": None, "goal": None}
 CODEX_UPDATE_MARKER = os.path.join(db.STATE_DIR, "last_codex_update_date")
 SUMMARY_INTERVAL_SECONDS = 60
 SUMMARY_TAIL_LINES = 60
@@ -99,7 +99,7 @@ def cascade_failed_deps(conn):
                FROM jobs j
                JOIN job_deps d ON d.job_id = j.id
                JOIN jobs dj ON dj.id = d.depends_on_job_id
-               WHERE j.status = 'queued' AND dj.status IN ('failed', 'stopped')"""
+               WHERE j.status = 'queued' AND dj.status IN ('failed', 'stopped', 'blocked')"""
         ).fetchall()
         if not rows:
             return
@@ -203,6 +203,24 @@ def make_on_message():
     return on_message
 
 
+def make_on_goal():
+    """Persist every thread/goal/updated payload plus our own turn counter, and log transitions
+    so a goal job's progress is visible in daemon.log as well as in the job row."""
+    def on_goal(job, goal, turns):
+        conn = db.connect()
+        try:
+            if goal:
+                db.record_goal(conn, job["id"], goal)
+            db.record_goal_turns(conn, job["id"], turns)
+        finally:
+            conn.close()
+        if goal:
+            log(f"job #{job['id']} ({job['slug']}) goal -> {goal.get('status')} "
+                f"tokens={goal.get('tokensUsed')}/{goal.get('tokenBudget')} turns={turns}")
+
+    return on_goal
+
+
 def make_on_ask_answer():
     def on_ask_answer(job, ask_id, text):
         conn = db.connect()
@@ -234,6 +252,15 @@ def make_on_done(state):
                 )
                 if schema_error:
                     log(f"job #{job['id']} ({job['slug']}) schema mismatch: {schema_error}")
+            elif status == "blocked":
+                # Goal mode only: the goal reported `blocked`, so the work stops with whatever the
+                # agent produced kept as the result -- it is a hand-back, not a failure.
+                conn.execute(
+                    """UPDATE jobs SET status='blocked', result=?, error=?, finished_at=?
+                       WHERE id=? AND status='running'""",
+                    (text, "goal blocked: needs a human decision before it can continue",
+                     db.now_iso(), job["id"]),
+                )
             else:
                 conn.execute(
                     "UPDATE jobs SET status='failed', error=?, finished_at=? WHERE id=? AND status='running'",
@@ -307,7 +334,8 @@ def interpolate_deps(conn, job):
     return DEP_REF_RE.sub(sub, prompt), missing
 
 
-def launch_ready_jobs(conn, state, on_done, on_tokens=None, on_ask_answer=None):
+def launch_ready_jobs(conn, state, on_done, on_tokens=None, on_ask_answer=None,
+                      on_goal=None):
     cfg = db.get_config(conn)
     running_count = conn.execute("SELECT COUNT(*) c FROM jobs WHERE status='running'").fetchone()["c"]
     for job in ready_jobs(conn):
@@ -350,6 +378,7 @@ def launch_ready_jobs(conn, state, on_done, on_tokens=None, on_ask_answer=None):
             js = driver(
                 job, on_done, on_tokens=on_tokens, on_ask_answer=on_ask_answer,
                 on_checkpoint=_hooks["checkpoint"], on_message=_hooks["message"],
+                on_goal=on_goal,
             )
         except Exception as e:  # noqa
             conn.execute(
@@ -565,7 +594,8 @@ def maybe_summarize(conn, state):
         if job_id in _summarizing:
             continue
         row = conn.execute(
-            "SELECT working_on_updated_at, workspace FROM jobs WHERE id=? AND status='running'", (job_id,)
+            "SELECT working_on_updated_at, workspace, worktree_path FROM jobs "
+            "WHERE id=? AND status='running'", (job_id,)
         ).fetchone()
         if not row:
             continue
@@ -579,7 +609,8 @@ def maybe_summarize(conn, state):
         if not log_text.strip():
             continue
         _summarizing.add(job_id)
-        threading.Thread(target=_run_summary, args=(job_id, row["workspace"], log_text), daemon=True).start()
+        cwd = (row["worktree_path"] or "").strip() or row["workspace"]
+        threading.Thread(target=_run_summary, args=(job_id, cwd, log_text), daemon=True).start()
 
 
 def tick(state, on_done):
@@ -592,7 +623,8 @@ def tick(state, on_done):
         draining = os.path.exists(db.DRAIN_MARKER)
         if not codex_update_due_today() and not draining:
             launch_ready_jobs(conn, state, on_done,
-                              on_tokens=_hooks["tokens"], on_ask_answer=_hooks["ask"])
+                              on_tokens=_hooks["tokens"], on_ask_answer=_hooks["ask"],
+                              on_goal=_hooks["goal"])
         sync_thread_ids(conn, state)
         check_budgets(conn, state)
         check_hangs(conn, state)
@@ -621,6 +653,7 @@ def main():
     _hooks["ask"] = make_on_ask_answer()
     _hooks["checkpoint"] = make_on_checkpoint()
     _hooks["message"] = make_on_message()
+    _hooks["goal"] = make_on_goal()
     conn = db.connect()
     try:
         recover_crashed_jobs(conn)

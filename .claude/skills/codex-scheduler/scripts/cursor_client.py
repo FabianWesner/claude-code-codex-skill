@@ -162,13 +162,17 @@ class CursorSession:
     """Drives one Cursor job. Interface-compatible with appserver_client.JobSession."""
 
     def __init__(self, job, on_done, on_tokens=None, on_ask_answer=None,
-                 on_checkpoint=None, on_message=None):
+                 on_checkpoint=None, on_message=None, on_goal=None):
         self.job = job
         self.on_done = on_done
         self.on_tokens = on_tokens
         self.on_ask_answer = on_ask_answer
         self.on_checkpoint = on_checkpoint
         self.on_message = on_message
+        # cursor-agent has no thread-level goal protocol; the kwarg is accepted so both drivers
+        # share one call signature, and a --goal on a cursor job is rejected at submit time.
+        self.on_goal = on_goal
+        self.cwd = db.job_cwd(job)
         self.dir = db.job_dir(job["id"], job["slug"])
         os.makedirs(self.dir, exist_ok=True)
         self.ctl = os.path.join(self.dir, "control")
@@ -317,12 +321,12 @@ class CursorSession:
     def start_turn(self, prompt):
         """Blocking: runs cursor-agent to completion. Call from its own thread."""
         argv = ["cursor-agent", "-p", "--output-format", "stream-json",
-                "--model", self.model, "--workspace", self.job["workspace"]]
+                "--model", self.model, "--workspace", self.cwd]
         argv += sandbox_args(self.job.get("sandbox", "workspace-write"))
         argv += ["--trust", build_preamble(self.job, _CLI_PATH) + prompt]
         try:
             self.p = subprocess.Popen(
-                argv, cwd=self.job["workspace"], stdin=subprocess.DEVNULL,
+                argv, cwd=self.cwd, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
             )
             self.pid = self.p.pid
