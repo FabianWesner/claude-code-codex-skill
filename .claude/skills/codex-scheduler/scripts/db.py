@@ -126,9 +126,14 @@ VALID_EFFORT = ("low", "medium", "high", "xhigh", "max", "ultra")
 VALID_SANDBOX = ("read-only", "workspace-write", "danger-full-access")
 VALID_STATUS = ("queued", "running", "done", "failed", "stopped", "blocked")
 # Which agent CLI runs the job. 'codex' drives `codex app-server` over JSON-RPC;
-# 'cursor' drives `cursor-agent -p --output-format stream-json` as a one-shot subprocess.
-VALID_ENGINE = ("codex", "cursor")
-DEFAULT_MODEL = {"codex": "gpt-5.6-sol", "cursor": "composer-2.5"}
+# 'cursor' drives `cursor-agent -p --output-format stream-json` as a one-shot subprocess;
+# 'opencode' drives `opencode run --format json` as a one-shot subprocess (resumable via
+# --session, no sandbox flag of any kind).
+VALID_ENGINE = ("codex", "cursor", "opencode")
+# The opencode default is the OpenCode Zen FREE tier. The `opencode-go/...-contributor` ids are a
+# paid plan and must never become the default.
+DEFAULT_MODEL = {"codex": "gpt-5.6-sol", "cursor": "composer-2.5",
+                 "opencode": "opencode/muse-spark-1.3-contributor-free"}
 
 
 def ensure_state_dirs():

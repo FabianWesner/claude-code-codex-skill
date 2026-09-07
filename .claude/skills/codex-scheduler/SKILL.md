@@ -127,7 +127,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 
 | command | purpose |
 |---|---|
-| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds] [--resume-from <slug> \| --resume-thread <id>] [--goal "..." \| --goal-file f] [--goal-budget N] [--goal-max-turns N] [--worktree] [--no-symlinks]` | queue one job |
+| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor\|opencode] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds] [--resume-from <slug> \| --resume-thread <id>] [--goal "..." \| --goal-file f] [--goal-budget N] [--goal-max-turns N] [--worktree] [--no-symlinks]` | queue one job |
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
@@ -185,7 +185,9 @@ thread carries irrelevant context and costs tokens on every turn.
 - **Context window limits still apply.** A resumed thread keeps growing and compacts itself when
   it fills, so a very long chain gradually loses its earliest detail. For a long epic, prefer a
   few resumed chunks over dozens.
-- Codex engine only — `--engine cursor` jobs have no resumable thread.
+- Codex and OpenCode only — `--engine cursor` jobs have no resumable thread. An OpenCode job
+  resumes its **OpenCode session** (`opencode run --session <id>`) with the same flags and the
+  same lineage display; a thread/session can only be continued on the engine that created it.
 - In a `submit-batch` file the same thing is `"resume_from": "<slug>"` (or
   `"resume_thread": "<id>"`) on a job spec. The source must already be terminal at submit time, so
   it cannot be another job in the same batch.
@@ -214,7 +216,7 @@ python3 $CLI submit --session <sid> --slug e12-epic --workspace /path/to/repo \
 - `--goal-budget <tokens>` is the thread's token budget. Running out settles the job rather than
   letting it grind on.
 - `--goal-max-turns N` (default 12) caps how many turns the scheduler will let the goal run for.
-- Codex engine only. `--engine cursor` has no thread goal and the submit is refused.
+- Codex engine only. `--engine cursor` and `--engine opencode` have no thread goal and the submit is refused.
 
 **What the status column means.** `list` shows `goal:<status>/<n>t` — the goal's status and the
 number of turns taken. The status vocabulary is the protocol's own
@@ -411,9 +413,9 @@ available reset credits, and lifetime/daily token usage. It queries Codex direct
 daemon, so it is safe to run at any time -- including before deciding whether to fan out a batch of
 expensive jobs.
 
-## Choosing the engine: Codex or Cursor
+## Choosing the engine: Codex, Cursor or OpenCode
 
-Every job runs under one of two agent CLIs, selected with `--engine` (default `codex`). Both are
+Every job runs under one of three agent CLIs, selected with `--engine` (default `codex`). All are
 driven through the same scheduler: dependencies, `--drain`, budgets, checkpoints, markers,
 structured output and token accounting all work identically, and a batch can mix them freely --
 including passing a Codex job's result into a Cursor job with `{{deps.<slug>.result}}`.
@@ -453,6 +455,45 @@ Cursor (there is no tier above `max`, so both just reach for the ceiling a famil
   for an approval nobody is there to give.
 - **Tokens** arrive once at the end rather than incrementally, and Cursor reports no context-window
   figure, so that field stays null.
+
+### OpenCode engine
+
+`--engine opencode` drives `opencode run --format json --model <provider/model> --dir <workspace>
+"<prompt>"` — a one-shot subprocess streaming newline-delimited JSON events, like Cursor.
+
+```bash
+... submit --engine opencode --slug spike --workspace <repo> \
+    --sandbox danger-full-access --prompt-file brief.md
+# follow-up in the SAME OpenCode session
+... submit --engine opencode --slug spike-2 --workspace <repo> \
+    --resume-from spike --prompt "..."
+```
+
+**When to use it (owner):** only when Codex is exhausted (rate limit or credit) and the Claude
+budget is gone too, or when a deliberately different model is wanted for a second opinion. It is
+not a routine lane; the routing table above still decides normal work.
+
+- **Model:** defaults to `opencode/muse-spark-1.3-contributor-free` — the OpenCode Zen free tier
+  the UI labels "Muse Spark 1.3 Free". The `opencode-go/…-contributor` ids are a **paid plan** and
+  must never be the default; pass one explicitly only if the owner asked for it. `--model` is
+  validated against `opencode models` at submit time, so a typo fails immediately with the ids
+  that do exist. `--effort` is recorded but means nothing here (no reasoning-level suffixes), and
+  `--fast` is rejected as the Codex-only service tier it is.
+- **No sandbox at all.** `opencode run` has no sandbox flag: tools run against the real filesystem
+  with whatever the user's OpenCode config permits. `danger-full-access` is the only honest label,
+  and submitting with anything else prints a note saying the value is recorded but not enforced.
+  Do not send an OpenCode job work you would only trust to `read-only`.
+- **Resumable.** Every event carries a `sessionID`; the driver stores it on the job like a Codex
+  thread id, so `--resume-from` continues the session with its context and prompt cache (verified:
+  the follow-up answered from memory with 13.5k of 13.9k input tokens served from cache).
+- **No mid-turn control**, same as Cursor: `steer` and `ask` are rejected with a clear message,
+  `stop` terminates the process.
+- **No goal mode** (`--goal`/`--goal-file` is refused; only Codex has a thread goal).
+- **Markers work identically:** `[[NOTE]]`/`[[CHECKPOINT]]` lines are dispatched and stripped, the
+  final assistant message becomes the result, tool calls are logged one line each, and tokens are
+  reported from the last `step_finish` event (input/cached/output/reasoning; no context-window
+  figure, so that field stays null). A nonzero exit or an `error` event fails the job with the
+  message OpenCode gave.
 
 ## Job parameters
 

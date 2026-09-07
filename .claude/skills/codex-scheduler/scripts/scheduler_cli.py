@@ -174,6 +174,8 @@ def validate_job_spec(spec):
         err(f"job '{spec['slug']}': engine must be one of {db.VALID_ENGINE}")
     if engine == "cursor":
         validate_cursor_model(spec)
+    if engine == "opencode":
+        validate_opencode_model(spec)
     effort = spec.get("effort", "medium")
     if effort not in db.VALID_EFFORT:
         err(f"job '{spec['slug']}': effort must be one of {db.VALID_EFFORT}")
@@ -184,7 +186,7 @@ def validate_job_spec(spec):
         err(f"job '{spec['slug']}': max-seconds must be >= 1")
     if spec.get("goal_objective") and engine != "codex":
         err(f"job '{spec['slug']}': --goal/--goal-file needs the codex engine "
-            f"(cursor-agent has no thread goal)")
+            f"(neither cursor-agent nor opencode has a thread goal)")
     if spec.get("goal_budget") is not None and spec["goal_budget"] < 1:
         err(f"job '{spec['slug']}': --goal-budget must be >= 1")
     if spec.get("goal_max_turns") is not None and spec["goal_max_turns"] < 1:
@@ -313,6 +315,42 @@ def validate_cursor_model(spec):
         f"+ --effort {spec.get('effort') or 'medium'}"
         f"{' + --fast' if spec.get('fast_mode') else ''})\n"
         f"  available in the '{family}' family: {', '.join(near) or '(none)'}")
+
+
+def validate_opencode_model(spec):
+    """Check the model id against `opencode models` and warn about the sandbox that isn't.
+
+    Two failures this catches at submit time rather than minutes into a job: a typo'd id (opencode
+    answers "Model not found" and exits 1), and a paid `opencode-go/...-contributor` id submitted
+    by habit when the free tier was meant."""
+    sys.path.insert(0, SCRIPT_DIR)
+    import opencode_client
+
+    model = (spec.get("model") or db.DEFAULT_MODEL["opencode"]).strip()
+    spec["model"] = model
+    spec["resolved_model"] = model
+    if spec.get("fast_mode"):
+        err(f"job '{spec['slug']}': --fast is a Codex service tier and means nothing to opencode")
+    if spec.get("sandbox") != "danger-full-access":
+        print(f"  note: `opencode run` has NO sandbox flag; --sandbox {spec.get('sandbox')} is "
+              f"recorded but not enforced. 'danger-full-access' is the only honest label.",
+              file=sys.stderr)
+    try:
+        out = subprocess.run([opencode_client.opencode_bin(), "models"],
+                             capture_output=True, text=True, timeout=60)
+    except Exception:  # noqa
+        print(f"  note: could not run `opencode models`; not validating '{model}'", file=sys.stderr)
+        return
+    if out.returncode != 0:
+        print(f"  note: `opencode models` failed; not validating '{model}'", file=sys.stderr)
+        return
+    ids = {ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip() and " " not in ln.strip()}
+    if not ids or model in ids:
+        return
+    provider = model.split("/", 1)[0]
+    near = sorted(m for m in ids if m.startswith(provider + "/"))[:12]
+    err(f"job '{spec['slug']}': opencode model '{model}' is not available.\n"
+        f"  available in '{provider}': {', '.join(near) or '(none)'}")
 
 
 def load_goal_arg(args):
@@ -494,9 +532,11 @@ def resolve_resume(conn, args, spec):
         err("--resume-from and --resume-thread are mutually exclusive")
     if not thread_id and not src_slug:
         return
-    if (spec.get("engine") or "codex") != "codex":
-        err("--resume-from/--resume-thread only work with the codex engine "
-            "(cursor-agent has no resumable thread)")
+    engine = spec.get("engine") or "codex"
+    if engine not in ("codex", "opencode"):
+        err(f"--resume-from/--resume-thread do not work with the '{engine}' engine "
+            f"(cursor-agent has no resumable thread); codex resumes a thread, "
+            f"opencode resumes a session")
     if src_slug:
         src = db.find_job_by_slug(conn, src_slug)
         if not src:
@@ -507,13 +547,15 @@ def resolve_resume(conn, args, spec):
         if src["status"] not in db.TERMINAL_STATUSES:
             err(f"--resume-from: job '{src_slug}' is {src['status']}; it must have finished "
                 f"(done/failed/stopped) before another job can continue its thread")
-        if (src.get("engine") or "codex") != "codex":
+        if (src.get("engine") or "codex") != engine:
             err(f"--resume-from: job '{src_slug}' ran on the "
-                f"'{src.get('engine')}' engine and has no resumable Codex thread")
+                f"'{src.get('engine') or 'codex'}' engine; this job is '{engine}'. "
+                f"A thread/session can only be continued on the engine that created it.")
         thread_id = (src.get("thread_id") or "").strip()
         if not thread_id:
-            err(f"--resume-from: job '{src_slug}' has no recorded thread id "
-                f"(it never reached the app-server, so there is nothing to resume)")
+            err(f"--resume-from: job '{src_slug}' has no recorded "
+                f"{'session' if engine == 'opencode' else 'thread'} id "
+                f"(it never reached the engine, so there is nothing to resume)")
     spec["resume_thread_id"] = thread_id
     spec["resume_from_slug"] = src_slug or None
     if not src_slug:
@@ -594,7 +636,8 @@ def cmd_submit(args):
     if spec.get("max_seconds"):
         extras.append(f"budget={spec['max_seconds']}s")
     if spec.get("resume_thread_id"):
-        extras.append(f"resumes {spec.get('resume_from_slug') or 'thread'} "
+        noun = "session" if (spec.get("engine") == "opencode") else "thread"
+        extras.append(f"resumes {spec.get('resume_from_slug') or noun} "
                       f"({spec['resume_thread_id']})")
     if spec.get("goal_objective"):
         extras.append("goal" + (":inherited" if spec.get("goal_set_on_start") == 0 else "")
@@ -705,8 +748,9 @@ def cmd_list(args):
         if not jobs:
             print("(no jobs)")
             return
-        widths = {"id": 4, "slug": 20, "status": 9, "effort": 6, "sandbox": 18, "session": 12, "thread": 22, "goal": 16, "workspace": 30}
+        widths = {"id": 4, "slug": 20, "status": 9, "engine": 8, "effort": 6, "sandbox": 18, "session": 12, "thread": 22, "goal": 16, "workspace": 30}
         header = f"{'ID':<{widths['id']}} {'SLUG':<{widths['slug']}} {'STATUS':<{widths['status']}} " \
+                 f"{'ENGINE':<{widths['engine']}} " \
                  f"{'EFFORT':<{widths['effort']}} {'SANDBOX':<{widths['sandbox']}} " \
                  f"{'SESSION':<{widths['session']}} {'THREAD':<{widths['thread']}} " \
                  f"{'GOAL':<{widths['goal']}} WORKSPACE"
@@ -734,8 +778,10 @@ def cmd_list(args):
                     goal += f"/{j['goal_turns']}t"
             else:
                 goal = "-"
+            engine = (j.get("engine") or "codex")
             print(
                 f"{j['id']:<{widths['id']}} {j['slug']:<{widths['slug']}} {j['status']:<{widths['status']}} "
+                f"{engine[:widths['engine']]:<{widths['engine']}} "
                 f"{j['effort']:<{widths['effort']}} {j['sandbox']:<{widths['sandbox']}} "
                 f"{j['claude_session_id'][:12]:<{widths['session']}} {thread[:widths['thread']]:<{widths['thread']}} "
                 f"{goal[:widths['goal']]:<{widths['goal']}} "
@@ -763,9 +809,15 @@ def cmd_show(args):
     finally:
         conn.close()
     print(json.dumps(job, indent=2))
+    engine = job.get("engine") or "codex"
+    noun = "session" if engine == "opencode" else "thread"
+    print(f"\nengine: {engine}  model: {job.get('model')}"
+          + ("  (opencode has no sandbox; tools run unconfined)" if engine == "opencode" else ""))
+    if job.get("thread_id"):
+        print(f"{noun}: {job['thread_id']}")
     if job.get("resume_thread_id"):
-        print(f"\nresumed from: {job.get('resume_from_slug') or '(thread id given directly)'} "
-              f"(thread {job['resume_thread_id']})")
+        print(f"resumed from: {job.get('resume_from_slug') or f'({noun} id given directly)'} "
+              f"({noun} {job['resume_thread_id']})")
     if job.get("goal_objective"):
         print("\ngoal:")
         print(f"  objective: {job['goal_objective'].strip()}")
@@ -1497,11 +1549,14 @@ def build_parser():
     pg.add_argument("--prompt-file")
     s.add_argument("--deps", default="")
     s.add_argument("--engine", default="codex", choices=db.VALID_ENGINE,
-                    help="which agent CLI runs the job: 'codex' (default) or 'cursor' "
-                         "(cursor-agent; default model cursor-grok-4.6, non-fast)")
+                    help="which agent CLI runs the job: 'codex' (default), 'cursor' "
+                         "(cursor-agent; default model composer-2.5) or 'opencode' "
+                         "(`opencode run`; default model "
+                         "opencode/muse-spark-1.3-contributor-free, no sandbox)")
     s.add_argument("--model", default=None,
                     help="model id; defaults per engine (codex: gpt-5.6-sol, "
-                         "cursor: cursor-grok-4.6 with the level from --effort)")
+                         "cursor: composer-2.5 with the level from --effort, "
+                         "opencode: opencode/muse-spark-1.3-contributor-free)")
     s.add_argument("--effort", default="medium", choices=db.VALID_EFFORT)
     s.add_argument("--fast", action="store_true")
     s.add_argument("--sandbox", default="workspace-write", choices=db.VALID_SANDBOX)

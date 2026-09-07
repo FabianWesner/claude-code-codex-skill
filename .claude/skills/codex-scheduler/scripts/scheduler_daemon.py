@@ -23,6 +23,7 @@ import time
 import db
 import appserver_client
 import cursor_client
+import opencode_client
 
 TICK_SECONDS = 2.0
 _hooks = {"tokens": None, "ask": None, "checkpoint": None, "message": None, "goal": None}
@@ -373,8 +374,10 @@ def launch_ready_jobs(conn, state, on_done, on_tokens=None, on_ask_answer=None,
         try:
             # Both drivers expose the same interface, so everything downstream -- reaping, hang
             # detection, budgets, the control plane -- is engine-agnostic.
-            driver = (cursor_client.CursorSession if job.get("engine") == "cursor"
-                      else appserver_client.JobSession)
+            driver = {
+                "cursor": cursor_client.CursorSession,
+                "opencode": opencode_client.OpencodeSession,
+            }.get(job.get("engine"), appserver_client.JobSession)
             js = driver(
                 job, on_done, on_tokens=on_tokens, on_ask_answer=on_ask_answer,
                 on_checkpoint=_hooks["checkpoint"], on_message=_hooks["message"],
