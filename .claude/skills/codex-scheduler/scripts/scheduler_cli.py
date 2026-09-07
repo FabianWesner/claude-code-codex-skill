@@ -284,8 +284,16 @@ def validate_cursor_model(spec):
         return
     if resolved in available:
         return
-    family = resolved.split("-")[0]
-    near = sorted(m for m in available if m.startswith(family))[:12]
+    # Prefer the requested base model as the family prefix: `resolved.split("-")[0]` collapses
+    # gpt-5.6-terra-medium to "gpt" and lists 12 unrelated ids, and it lists nothing useful when
+    # the base itself is the typo. Fall back to the first segment only if the base matches nothing.
+    base = (spec.get("model") or db.DEFAULT_MODEL["cursor"]).strip()
+    family = base
+    near = sorted(m for m in available if m.startswith(family))
+    if not near:
+        family = resolved.split("-")[0]
+        near = sorted(m for m in available if m.startswith(family))
+    near = near[:12]
     err(f"job '{spec['slug']}': cursor model '{resolved}' is not available.\n"
         f"  (from --model {spec.get('model') or db.DEFAULT_MODEL['cursor']} "
         f"+ --effort {spec.get('effort') or 'medium'}"

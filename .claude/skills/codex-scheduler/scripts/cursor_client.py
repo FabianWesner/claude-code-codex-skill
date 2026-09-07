@@ -15,6 +15,7 @@ Protocol is different, though: where Codex speaks JSON-RPC over a long-lived `co
 """
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -49,6 +50,13 @@ _LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
 _models_cache = {"at": 0.0, "ids": None}
 _MODELS_TTL = 600
 
+# `cursor-agent --list-models` writes to a TTY-agnostic pretty printer: every id is wrapped in SGR
+# colour codes and the id/description separator is emitted as "<esc>[39m <esc>[2m- ", so the plain
+# " - " split never matches and the escapes end up inside the parsed id. Strip them first.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Lines that are chrome rather than a model id.
+_MODELS_NOISE_PREFIXES = ("available models", "tip:", "usage:", "note:")
+
 
 def available_models(force=False):
     """Model ids `cursor-agent --list-models` reports, or None if it cannot be asked.
@@ -66,14 +74,24 @@ def available_models(force=False):
         return None
     if out.returncode != 0:
         return None
-    ids = set()
-    for line in (out.stdout or "").splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith("available models"):
-            continue
-        ids.add(line.split(" - ", 1)[0].strip() if " - " in line else line)
-    ids.discard("")
+    ids = parse_models(out.stdout or "")
+    if not ids:
+        return None      # unparseable output is "could not find out", not "nothing available"
     _models_cache.update({"at": now, "ids": ids})
+    return ids
+
+
+def parse_models(text):
+    """Model ids out of `cursor-agent --list-models` output (ANSI-decorated, one id per line)."""
+    ids = set()
+    for line in text.splitlines():
+        line = _ANSI_RE.sub("", line).strip()
+        if not line or line.lower().startswith(_MODELS_NOISE_PREFIXES):
+            continue
+        ident = line.split(" - ", 1)[0].strip() if " - " in line else line
+        # A real id is a single bare token; anything with whitespace is prose we do not want.
+        if ident and " " not in ident:
+            ids.add(ident)
     return ids
 
 

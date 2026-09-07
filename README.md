@@ -3,12 +3,14 @@
 Claude Code skills. Four skills:
 
 - **`codex-subagent`** — the primitives: one-shot Codex runs and steerable Codex app-server
-  sessions, driven directly.
-- **`codex-scheduler`** — a job system built on top of those primitives: submit Codex jobs with a
-  slug, dependencies, and per-job model/effort/fast-mode; a global daemon runs them with a
-  configurable parallelism limit and notifies the submitting Claude session natively (via
-  Claude Code's background-task mechanism) when a job finishes or fails, instead of requiring
-  Claude to keep polling. Includes a live local dashboard.
+  sessions, driven directly. Defaults to `gpt-5.6-sol`; `gpt-6-astra` is available for the
+  hardest problems.
+- **`codex-scheduler`** — a job system built on top of those primitives: submit jobs with a slug,
+  dependencies, and per-job model/effort/fast-mode; a global daemon runs them with a configurable
+  parallelism limit and notifies the submitting Claude session natively (via Claude Code's
+  background-task mechanism) when a job finishes or fails, instead of requiring Claude to keep
+  polling. Runs jobs on **Codex or Cursor** (Composer, or Grok 4.6 with a chosen reasoning
+  level) — a batch can mix both engines freely. Includes a live local dashboard.
 - **`issue-tracker`** — a per-project issue tracker with a live kanban board: Open, Planned,
   In Progress, Deployed, Done, Cancelled. Claude files, moves, and flags issues from the CLI;
   the board is a read-only view at `localhost:2345`, live over SSE.
@@ -27,6 +29,7 @@ Claude Code skills. Four skills:
 - `.claude/skills/codex-scheduler/scripts/appserver_client.py` — the app-server client each job runs on, embeddable in the daemon.
 - `.claude/skills/codex-scheduler/scripts/scheduler_daemon.py` — the global orchestrator (dependency graph, parallelism limit, hang/crash recovery).
 - `.claude/skills/codex-scheduler/scripts/scheduler_cli.py` — the CLI Claude actually calls (submit/list/show/wait/steer/stop/rm/edit/reorder/config/ui).
+- `.claude/skills/codex-scheduler/scripts/cursor_client.py` — the Cursor engine driver (`cursor-agent`), interface-compatible with `appserver_client.py` so the daemon drives either engine through identical code.
 - `.claude/skills/codex-scheduler/scripts/dashboard.py` + `scripts/static/index.html` — the live local dashboard.
 - `.claude/skills/issue-tracker/SKILL.md` documents the issue-tracker skill.
 - `.claude/skills/issue-tracker/issues.js` — the CLI Claude calls (add/start/deploy/done/cancel/flag/list/show/...).
@@ -39,6 +42,8 @@ Claude Code skills. Four skills:
 
 - Claude Code with local skill support.
 - OpenAI Codex CLI installed and authenticated (for `codex-subagent` / `codex-scheduler` only).
+- Cursor CLI (`cursor-agent`) installed and authenticated, only if you want `codex-scheduler`'s
+  Cursor engine (`--engine cursor`) — Codex-only use doesn't need it.
 - Python 3.9 or newer (stdlib only) for `codex-subagent` / `codex-scheduler`.
 - Node.js (no dependencies) for `issue-tracker`.
 
@@ -94,6 +99,11 @@ cat .claude/skills/logbook/SKILL.md
   `wait` channel as job completion
 - a daily `npm install -g @openai/codex` before the first job launches each day, so Codex stays
   current
+- **two engines, one interface**: `--engine codex` (default) or `--engine cursor`, selecting
+  Cursor's Composer or Grok 4.6 — `--effort` picks Grok's reasoning level (low/medium/high/xhigh),
+  resolved and validated against Cursor's own live model list before the job ever launches.
+  Cursor jobs can't be `steer`ed or `ask`ed (no mid-turn channel — `cursor-agent -p` is one-shot),
+  but their reasoning is visible in the log, unlike Codex's single marker.
 
 `issue-tracker` covers:
 
