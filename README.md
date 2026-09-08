@@ -95,6 +95,16 @@ cat .claude/skills/logbook/SKILL.md
   isn't already up) — showing every job's status, a "Working On" summary, and a live log tail,
   with a Cancel button per running job
 - safe concurrent use from multiple Claude sessions and sub-agents at once
+- `submit --worktree`: a per-job git worktree at `<workspace>/.claude/worktrees/<slug>` on branch
+  `lane/<slug>`, so two lanes on one repo never overwrite each other. It is prepared to be
+  runnable: `vendor` is **cloned** from the main checkout (APFS clone on macOS, reflink on Linux,
+  plain copy otherwise) and `composer dump-autoload` is re-run inside the worktree, `node_modules`
+  is **symlinked**, and `.env` is copied with any sqlite `DB_DATABASE=` repointed at the worktree's
+  own database. `--no-symlinks` skips the whole preparation step.
+  `vendor` must not be a symlink: Composer bakes `$baseDir = dirname($vendorDir)` from the real
+  path into `vendor/composer/autoload_psr4.php`, so a symlinked `vendor` autoloads the main
+  checkout's classes and every test inside the worktree quietly tests the wrong code. Node has no
+  such problem (it resolves relative to the real file), so `node_modules` stays a cheap symlink.
 - Codex can message the submitting Claude session mid-run (`notify`), delivered through the same
   `wait` channel as job completion
 - a daily `npm install -g @openai/codex` before the first job launches each day, so Codex stays

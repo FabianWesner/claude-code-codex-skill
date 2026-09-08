@@ -267,10 +267,20 @@ python3 $CLI submit --session <sid> --slug e12-epic --workspace /Users/you/repo 
   of that name is reused, never recreated.
 - `workspace` on the job row stays the main checkout; `worktree_path` is what the job actually
   runs in. `list` shows the worktree path in the WORKSPACE column and `show` prints the branch.
-- A fresh worktree is bare, so submit prepares it and prints what it did: `vendor` and
-  `node_modules` are **symlinked** from the main checkout when they exist there, `.env` is copied
-  with a sqlite `DB_DATABASE=` rewritten to `<worktree>/database/database.sqlite`, and the main
-  checkout's `database/database.sqlite` is copied to that path. `--no-symlinks` skips all of that.
+- A fresh worktree is bare, so submit prepares it and prints what it did: `vendor` is **cloned**
+  from the main checkout (APFS clone `cp -c -R` on macOS, `cp -R --reflink=auto` on Linux, plain
+  copy otherwise) and `composer dump-autoload --no-interaction` runs in the worktree when it has a
+  `composer.json`; `node_modules` is **symlinked**; `.env` is copied with a sqlite `DB_DATABASE=`
+  rewritten to `<worktree>/database/database.sqlite`, and the main checkout's
+  `database/database.sqlite` is copied to that path. `--no-symlinks` skips all of that.
+- **Why `vendor` is never a symlink.** Composer writes `vendor/composer/autoload_psr4.php` with
+  `$baseDir = dirname($vendorDir)` resolved from the *real* path, so a symlinked `vendor` makes the
+  worktree autoload `App\` and `Tests\` out of the MAIN checkout: every test run inside the
+  worktree silently exercises main's code instead of the branch's, and passes. (Found in
+  daemons.run on 2026-09-08.) The clone is nearly free on a copy-on-write filesystem, and the
+  `dump-autoload` afterwards rewrites those paths for the worktree. `node_modules` has no such
+  problem, because Node resolves modules relative to the real file's location, so it stays a
+  symlink and stays free.
 - `--resume-from` **inherits the source job's worktree**, so every turn of an epic lands in the
   same tree. If that worktree has since been removed the submit is refused rather than silently
   running in the main checkout.

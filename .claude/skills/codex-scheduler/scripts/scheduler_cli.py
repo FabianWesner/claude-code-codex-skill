@@ -415,9 +415,45 @@ def _rewrite_env_for_worktree(src_env, dst_env, worktree):
     return sqlite_target
 
 
+def _clone_tree(src, dst):
+    """Copy a directory as cheaply as the filesystem allows: an APFS clone on macOS
+    (`cp -c -R`), a reflink copy on Linux (`cp -R --reflink=auto`), else a plain copy.
+    Returns a short label describing which path was taken."""
+    attempts = []
+    if sys.platform == "darwin":
+        attempts.append((["cp", "-c", "-R", src, dst], "APFS clone"))
+    else:
+        attempts.append((["cp", "-R", "--reflink=auto", src, dst], "reflink copy"))
+    for argv, label in attempts:
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode == 0:
+            return label
+        shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst, symlinks=True)
+    return "plain copy"
+
+
+def _composer_dump_autoload(worktree):
+    """Regenerate the Composer autoloader inside the worktree.
+
+    Cloning `vendor/` copies `vendor/composer/autoload_psr4.php`, whose `$baseDir` was computed
+    from the MAIN checkout, so without this the worktree's `App\\` and `Tests\\` still resolve to
+    main's source and every test run silently exercises the wrong code."""
+    if not os.path.exists(os.path.join(worktree, "composer.json")):
+        return None
+    if not shutil.which("composer"):
+        return "composer not found on PATH -- run `composer dump-autoload` in the worktree yourself"
+    r = subprocess.run(["composer", "dump-autoload", "--no-interaction"],
+                       cwd=worktree, capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"composer dump-autoload failed: {(r.stderr or r.stdout).strip().splitlines()[-1:]}"
+    return "composer dump-autoload regenerated the autoloader for this worktree"
+
+
 def prepare_worktree(workspace, slug, symlinks=True):
     """Create (or reuse) <workspace>/.claude/worktrees/<slug> on branch lane/<slug>, based on the
-    current main HEAD, and make it runnable: vendor/node_modules symlinked from the main checkout,
+    current main HEAD, and make it runnable: vendor CLONED from the main checkout (never
+    symlinked) with the autoloader regenerated, node_modules symlinked,
     .env copied with a per-worktree sqlite path, and the main sqlite database copied to it.
 
     Nothing here is ever deleted automatically -- `worktree-remove <slug>` is explicit on purpose.
@@ -445,7 +481,21 @@ def prepare_worktree(workspace, slug, symlinks=True):
     if not symlinks:
         notes.append("--no-symlinks: vendor/node_modules/.env not prepared")
         return path, branch, notes
-    for name in ("vendor", "node_modules"):
+    # vendor is CLONED, never symlinked: Composer's autoload_psr4.php derives $baseDir from
+    # dirname(realpath(vendor)), so a symlinked vendor makes the worktree autoload the MAIN
+    # checkout's classes. node_modules stays a symlink -- Node resolves relative to the real
+    # file location, so it has no equivalent problem, and the tree is far larger.
+    vendor_src, vendor_dst = os.path.join(workspace, "vendor"), os.path.join(path, "vendor")
+    if os.path.isdir(vendor_src) and not os.path.exists(vendor_dst):
+        try:
+            how = _clone_tree(vendor_src, vendor_dst)
+            notes.append(f"vendor copied by {how} (not symlinked: Composer autoload paths)")
+            dumped = _composer_dump_autoload(path)
+            if dumped:
+                notes.append(dumped)
+        except Exception as e:  # noqa: BLE001 -- report, never abort the whole submit
+            notes.append(f"could not copy vendor: {e}")
+    for name in ("node_modules",):
         src, dst = os.path.join(workspace, name), os.path.join(path, name)
         if os.path.exists(dst) or not os.path.exists(src):
             continue
