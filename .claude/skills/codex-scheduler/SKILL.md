@@ -127,7 +127,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 
 | command | purpose |
 |---|---|
-| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor\|opencode] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds] [--resume-from <slug> \| --resume-thread <id>] [--goal "..." \| --goal-file f] [--goal-budget N] [--goal-max-turns N] [--worktree] [--no-symlinks]` | queue one job |
+| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor\|opencode\|omp] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds] [--resume-from <slug> \| --resume-thread <id>] [--goal "..." \| --goal-file f] [--goal-budget N] [--goal-max-turns N] [--worktree] [--no-symlinks]` | queue one job |
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
@@ -185,9 +185,10 @@ thread carries irrelevant context and costs tokens on every turn.
 - **Context window limits still apply.** A resumed thread keeps growing and compacts itself when
   it fills, so a very long chain gradually loses its earliest detail. For a long epic, prefer a
   few resumed chunks over dozens.
-- Codex and OpenCode only — `--engine cursor` jobs have no resumable thread. An OpenCode job
-  resumes its **OpenCode session** (`opencode run --session <id>`) with the same flags and the
-  same lineage display; a thread/session can only be continued on the engine that created it.
+- Codex, OpenCode and OMP only — `--engine cursor` jobs have no resumable thread. An OpenCode or
+  OMP job resumes its **session** (`opencode run --session <id>` / `omp -r <id>`) with the same
+  flags and the same lineage display; a thread/session can only be continued on the engine that
+  created it.
 - In a `submit-batch` file the same thing is `"resume_from": "<slug>"` (or
   `"resume_thread": "<id>"`) on a job spec. The source must already be terminal at submit time, so
   it cannot be another job in the same batch.
@@ -216,7 +217,7 @@ python3 $CLI submit --session <sid> --slug e12-epic --workspace /path/to/repo \
 - `--goal-budget <tokens>` is the thread's token budget. Running out settles the job rather than
   letting it grind on.
 - `--goal-max-turns N` (default 12) caps how many turns the scheduler will let the goal run for.
-- Codex engine only. `--engine cursor` and `--engine opencode` have no thread goal and the submit is refused.
+- Codex engine only. `--engine cursor`, `--engine opencode` and `--engine omp` have no thread goal and the submit is refused.
 
 **What the status column means.** `list` shows `goal:<status>/<n>t` — the goal's status and the
 number of turns taken. The status vocabulary is the protocol's own
@@ -423,9 +424,9 @@ available reset credits, and lifetime/daily token usage. It queries Codex direct
 daemon, so it is safe to run at any time -- including before deciding whether to fan out a batch of
 expensive jobs.
 
-## Choosing the engine: Codex, Cursor or OpenCode
+## Choosing the engine: Codex, Cursor, OpenCode or OMP
 
-Every job runs under one of three agent CLIs, selected with `--engine` (default `codex`). All are
+Every job runs under one of four agent CLIs, selected with `--engine` (default `codex`). All are
 driven through the same scheduler: dependencies, `--drain`, budgets, checkpoints, markers,
 structured output and token accounting all work identically, and a batch can mix them freely --
 including passing a Codex job's result into a Cursor job with `{{deps.<slug>.result}}`.
@@ -504,6 +505,43 @@ not a routine lane; the routing table above still decides normal work.
   reported from the last `step_finish` event (input/cached/output/reasoning; no context-window
   figure, so that field stays null). A nonzero exit or an `error` event fails the job with the
   message OpenCode gave.
+
+### OMP engine
+
+`--engine omp` drives `omp -p --mode json --model opencode-go/deepseek-v4.1-flash --thinking high
+"<prompt>"` — a one-shot subprocess streaming newline-delimited JSON events, like Cursor and
+OpenCode. It is scoped to exactly **one** model at exactly **one** reasoning level: DeepSeek v4.1
+Flash, `high` thinking. That is a deliberate, narrow deployment, not a placeholder -- nothing else
+has been wired up or validated for this engine.
+
+```bash
+... submit --engine omp --slug spike --workspace <repo> \
+    --effort high --sandbox danger-full-access --prompt-file brief.md
+# follow-up in the SAME omp session
+... submit --engine omp --slug spike-2 --workspace <repo> \
+    --resume-from spike --prompt "..."
+```
+
+- **Model and effort are fixed.** `--model` (if passed) must resolve to
+  `opencode-go/deepseek-v4.1-flash` (a bare `deepseek-v4.1-flash` is also accepted); anything else
+  fails at submit time. `--effort` must be `high` (the model's other levels, `low`/`max`, are not
+  wired up); anything else fails at submit time too. `--fast` is rejected as the Codex-only service
+  tier it is.
+- **No sandbox at all**, same as OpenCode: `omp` has no sandbox flag, tool calls run against the
+  real filesystem gated only by `--auto-approve`. `danger-full-access` is the only honest label;
+  submitting with anything else prints a note saying the value is recorded but not enforced.
+- **Resumable.** Every run prints a `session` event with a uuid; the driver stores it on the job
+  like an OpenCode session id, so `--resume-from` continues the session with its context and
+  prompt cache (verified: a follow-up answered from memory with the bulk of input tokens served
+  from cache).
+- **No mid-turn control**, same as Cursor/OpenCode: `steer` and `ask` are rejected with a clear
+  message, `stop` terminates the process.
+- **No goal mode** (`--goal`/`--goal-file` is refused; only Codex has a thread goal).
+- **Markers work identically:** `[[NOTE]]`/`[[CHECKPOINT]]` lines are dispatched and stripped, the
+  final assistant message becomes the result, tool calls are logged one line each, and tokens are
+  reported from the `turn_end` event's usage (input/cached/output/reasoning; no context-window
+  figure, so that field stays null). A nonzero exit or a non-JSON stdout line fails the job with
+  that text as the error.
 
 ## Job parameters
 

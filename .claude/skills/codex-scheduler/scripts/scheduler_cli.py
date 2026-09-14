@@ -176,6 +176,8 @@ def validate_job_spec(spec):
         validate_cursor_model(spec)
     if engine == "opencode":
         validate_opencode_model(spec)
+    if engine == "omp":
+        validate_omp_model(spec)
     effort = spec.get("effort", "medium")
     if effort not in db.VALID_EFFORT:
         err(f"job '{spec['slug']}': effort must be one of {db.VALID_EFFORT}")
@@ -186,7 +188,7 @@ def validate_job_spec(spec):
         err(f"job '{spec['slug']}': max-seconds must be >= 1")
     if spec.get("goal_objective") and engine != "codex":
         err(f"job '{spec['slug']}': --goal/--goal-file needs the codex engine "
-            f"(neither cursor-agent nor opencode has a thread goal)")
+            f"(none of cursor-agent, opencode, or omp has a thread goal)")
     if spec.get("goal_budget") is not None and spec["goal_budget"] < 1:
         err(f"job '{spec['slug']}': --goal-budget must be >= 1")
     if spec.get("goal_max_turns") is not None and spec["goal_max_turns"] < 1:
@@ -351,6 +353,32 @@ def validate_opencode_model(spec):
     near = sorted(m for m in ids if m.startswith(provider + "/"))[:12]
     err(f"job '{spec['slug']}': opencode model '{model}' is not available.\n"
         f"  available in '{provider}': {', '.join(near) or '(none)'}")
+
+
+def validate_omp_model(spec):
+    """omp is deployed for exactly one model/effort combination: DeepSeek v4.1 Flash at the
+    `high` thinking level. A --model/--effort that doesn't resolve to that combination is a
+    submit-time error rather than a silent override, since nothing else has been validated
+    end to end for this engine."""
+    sys.path.insert(0, SCRIPT_DIR)
+    import omp_client
+
+    model = omp_client.resolve_model(spec.get("model"))
+    if model is None:
+        err(f"job '{spec['slug']}': omp engine only supports model "
+            f"'{omp_client.MODEL}' (high effort only); got --model {spec.get('model')!r}")
+    effort = omp_client.resolve_effort(spec.get("effort"))
+    if effort is None:
+        err(f"job '{spec['slug']}': omp engine only supports --effort high "
+            f"(DeepSeek v4.1 Flash is deployed at the 'high' thinking level only); "
+            f"got --effort {spec.get('effort')!r}")
+    spec["model"] = model
+    spec["resolved_model"] = model
+    if spec.get("fast_mode"):
+        err(f"job '{spec['slug']}': --fast is a Codex service tier and means nothing to omp")
+    if spec.get("sandbox") != "danger-full-access":
+        print(f"  note: `omp` has NO sandbox flag; --sandbox {spec.get('sandbox')} is recorded "
+              f"but not enforced. 'danger-full-access' is the only honest label.", file=sys.stderr)
 
 
 def load_goal_arg(args):
@@ -583,10 +611,10 @@ def resolve_resume(conn, args, spec):
     if not thread_id and not src_slug:
         return
     engine = spec.get("engine") or "codex"
-    if engine not in ("codex", "opencode"):
+    if engine not in ("codex", "opencode", "omp"):
         err(f"--resume-from/--resume-thread do not work with the '{engine}' engine "
             f"(cursor-agent has no resumable thread); codex resumes a thread, "
-            f"opencode resumes a session")
+            f"opencode and omp resume a session")
     if src_slug:
         src = db.find_job_by_slug(conn, src_slug)
         if not src:
@@ -604,7 +632,7 @@ def resolve_resume(conn, args, spec):
         thread_id = (src.get("thread_id") or "").strip()
         if not thread_id:
             err(f"--resume-from: job '{src_slug}' has no recorded "
-                f"{'session' if engine == 'opencode' else 'thread'} id "
+                f"{'session' if engine in ('opencode', 'omp') else 'thread'} id "
                 f"(it never reached the engine, so there is nothing to resume)")
     spec["resume_thread_id"] = thread_id
     spec["resume_from_slug"] = src_slug or None
@@ -686,7 +714,7 @@ def cmd_submit(args):
     if spec.get("max_seconds"):
         extras.append(f"budget={spec['max_seconds']}s")
     if spec.get("resume_thread_id"):
-        noun = "session" if (spec.get("engine") == "opencode") else "thread"
+        noun = "session" if (spec.get("engine") in ("opencode", "omp")) else "thread"
         extras.append(f"resumes {spec.get('resume_from_slug') or noun} "
                       f"({spec['resume_thread_id']})")
     if spec.get("goal_objective"):
@@ -860,9 +888,10 @@ def cmd_show(args):
         conn.close()
     print(json.dumps(job, indent=2))
     engine = job.get("engine") or "codex"
-    noun = "session" if engine == "opencode" else "thread"
+    noun = "session" if engine in ("opencode", "omp") else "thread"
     print(f"\nengine: {engine}  model: {job.get('model')}"
-          + ("  (opencode has no sandbox; tools run unconfined)" if engine == "opencode" else ""))
+          + (f"  ({engine} has no sandbox; tools run unconfined)"
+             if engine in ("opencode", "omp") else ""))
     if job.get("thread_id"):
         print(f"{noun}: {job['thread_id']}")
     if job.get("resume_thread_id"):
@@ -1600,13 +1629,15 @@ def build_parser():
     s.add_argument("--deps", default="")
     s.add_argument("--engine", default="codex", choices=db.VALID_ENGINE,
                     help="which agent CLI runs the job: 'codex' (default), 'cursor' "
-                         "(cursor-agent; default model composer-2.5) or 'opencode' "
+                         "(cursor-agent; default model composer-2.5), 'opencode' "
                          "(`opencode run`; default model "
-                         "opencode/muse-spark-1.3-contributor-free, no sandbox)")
+                         "opencode/muse-spark-1.3-contributor-free, no sandbox) or 'omp' "
+                         "(`omp`; DeepSeek v4.1 Flash at --effort high only, no sandbox)")
     s.add_argument("--model", default=None,
                     help="model id; defaults per engine (codex: gpt-5.6-sol, "
                          "cursor: composer-2.5 with the level from --effort, "
-                         "opencode: opencode/muse-spark-1.3-contributor-free)")
+                         "opencode: opencode/muse-spark-1.3-contributor-free, "
+                         "omp: opencode-go/deepseek-v4.1-flash, the only model it supports)")
     s.add_argument("--effort", default="medium", choices=db.VALID_EFFORT)
     s.add_argument("--fast", action="store_true")
     s.add_argument("--sandbox", default="workspace-write", choices=db.VALID_SANDBOX)
