@@ -437,6 +437,9 @@ including passing a Codex job's result into a Cursor job with `{{deps.<slug>.res
 
 # Cursor with Grok 4.6, non-fast, choosing the reasoning level
 ... submit --engine cursor --model cursor-grok-4.6 --effort xhigh --slug review ...
+
+# Cursor with Gemini 3.8 Flash, choosing the reasoning level (low/medium/high; no xhigh/max tier)
+... submit --engine cursor --model gemini-3.8-flash --effort high --slug review ...
 ```
 
 **Model and reasoning level.** Cursor bakes the reasoning level into the model id, so `--effort`
@@ -447,7 +450,7 @@ selects the suffix rather than a separate parameter:
 | `low` / `medium` / `high` / `xhigh` | `-low` / `-medium` / `-high` / `-xhigh` | `composer-2.5` (no levels) |
 | `max` / `ultra` | `-xhigh` (no higher tier exists) | `composer-2.5` |
 
-Families differ -- Grok 4.6 stops at `xhigh` while Luna and Sol also offer `max` -- so resolution
+Families differ -- Grok 4.6 stops at `xhigh`, Gemini 3.8 Flash stops at `high`, Luna and Sol also offer `max` -- so resolution
 is checked against `cursor-agent --list-models` rather than assumed, and **submit fails
 immediately** with the available ids if a pairing does not exist. The resolved id is echoed on
 submit (`model=cursor-grok-4.6-xhigh`) so there is never doubt about what a job actually ran.

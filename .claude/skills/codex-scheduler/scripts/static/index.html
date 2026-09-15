@@ -23,6 +23,7 @@
   .done { background: #23863633; color: #3fb950; }
   .failed { background: #da363333; color: #f85149; }
   .stopped { background: #6e768133; color: #8b949e; }
+  .blocked { background: #d2992233; color: #d29922; }
   .slug { font-family: ui-monospace, monospace; }
   .deps { color: #8b949e; font-size: 11px; }
   .detail { display: none; background: #0d1117; }
@@ -181,7 +182,7 @@ function isNearBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 24;
 }
 
-const TERMINAL_STATUSES = new Set(['done', 'failed', 'stopped']);
+const TERMINAL_STATUSES = new Set(['done', 'failed', 'stopped', 'blocked']);
 const timeWindowEl = document.getElementById('timeWindow');
 try {
   const saved = localStorage.getItem('codex-scheduler-time-window');
