@@ -113,11 +113,18 @@ def resolve_model(model, effort, fast_mode=False, available=None):
     if any(model.endswith("-" + lv) or model.endswith("-" + lv + "-fast") for lv in _LEVELS):
         return with_fast(model)
 
+    if available is None:
+        available = available_models()
+    if available is not None:
+        # The `cursor-` prefix is inconsistent across families (`cursor-grok-4.6` but `grok-4.7`),
+        # so accept either spelling and use whichever one the CLI actually lists.
+        alt = model[len("cursor-"):] if model.startswith("cursor-") else "cursor-" + model
+        if not any(a == model or a.startswith(model + "-") for a in available) and \
+                any(a == alt or a.startswith(alt + "-") for a in available):
+            model = alt
     chain = EFFORT_TO_LEVELS.get(effort or "medium", ("medium",))
     candidates = [with_fast(f"{model}-{lv}") for lv in chain]
     bare = with_fast(model)
-    if available is None:
-        available = available_models()
     if available is None:
         return candidates[0]      # cannot check; the preferred level is the common case
     for c in candidates:
