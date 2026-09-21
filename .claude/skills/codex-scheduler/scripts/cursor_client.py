@@ -44,7 +44,7 @@ EFFORT_TO_LEVELS = {
     "max": ("max", "xhigh", "high"),
     "ultra": ("max", "xhigh", "high"),
 }
-DEFAULT_MODEL_BASE = "composer-2.5"
+DEFAULT_MODEL_BASE = "grok-4.7"
 _LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
 
 _models_cache = {"at": 0.0, "ids": None}

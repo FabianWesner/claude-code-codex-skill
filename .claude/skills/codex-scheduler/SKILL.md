@@ -433,6 +433,7 @@ including passing a Codex job's result into a Cursor job with `{{deps.<slug>.res
 
 ```bash
 # Cursor with Composer (no reasoning levels -- one tier)
+... submit --engine cursor --slug build --workspace <repo> --prompt "..."   # default model: grok-4.7 (--effort picks the level, default medium)
 ... submit --engine cursor --model composer-2.5 --slug build --workspace <repo> --prompt "..."
 
 # Cursor with Grok 4.7, non-fast, choosing the reasoning level

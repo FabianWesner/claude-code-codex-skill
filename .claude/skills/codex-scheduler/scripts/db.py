@@ -137,7 +137,7 @@ VALID_STATUS = ("queued", "running", "done", "failed", "stopped", "blocked")
 VALID_ENGINE = ("codex", "cursor", "opencode", "omp", "grok")
 # The opencode default is the OpenCode Zen FREE tier. The `opencode-go/...-contributor` ids are a
 # paid plan and must never become the default.
-DEFAULT_MODEL = {"codex": "gpt-5.6-sol", "cursor": "composer-2.5",
+DEFAULT_MODEL = {"codex": "gpt-5.6-sol", "cursor": "grok-4.7",
                  "opencode": "opencode/muse-spark-1.3-contributor-free",
                  "omp": "opencode-go/deepseek-v4.1-flash",
                  "grok": "grok-4.7"}

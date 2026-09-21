@@ -1660,7 +1660,7 @@ def build_parser():
     s.add_argument("--deps", default="")
     s.add_argument("--engine", default="codex", choices=db.VALID_ENGINE,
                     help="which agent CLI runs the job: 'codex' (default), 'cursor' "
-                         "(cursor-agent; default model composer-2.5), 'opencode' "
+                         "(cursor-agent; default model grok-4.7), 'opencode' "
                          "(`opencode run`; default model "
                          "opencode/muse-spark-1.3-contributor-free, no sandbox), 'omp' "
                          "(`omp`; DeepSeek v4.1 Flash at --effort high only, no sandbox) or "
@@ -1668,7 +1668,7 @@ def build_parser():
                          "--effort low/medium/high/xhigh, real enforced sandbox)")
     s.add_argument("--model", default=None,
                     help="model id; defaults per engine (codex: gpt-5.6-sol, "
-                         "cursor: composer-2.5 with the level from --effort, "
+                         "cursor: grok-4.7 with the level from --effort, "
                          "opencode: opencode/muse-spark-1.3-contributor-free, "
                          "omp: opencode-go/deepseek-v4.1-flash, the only model it supports, "
                          "grok: grok-4.7)")
