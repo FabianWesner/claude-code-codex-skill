@@ -131,12 +131,16 @@ VALID_STATUS = ("queued", "running", "done", "failed", "stopped", "blocked")
 # --session, no sandbox flag of any kind);
 # 'omp' drives `omp -p --mode json` as a one-shot subprocess (resumable via -r, no sandbox flag of
 # any kind) -- scoped to exactly one model, DeepSeek v4.1 Flash at the `high` thinking level.
-VALID_ENGINE = ("codex", "cursor", "opencode", "omp")
+# 'grok' drives `grok -p --output-format streaming-json` as a one-shot subprocess (resumable via
+# -r), Grok 4.7 (500k context) at any of low/medium/high/xhigh -- and, unlike opencode/omp, a REAL enforced
+# sandbox (--sandbox read-only/workspace/none).
+VALID_ENGINE = ("codex", "cursor", "opencode", "omp", "grok")
 # The opencode default is the OpenCode Zen FREE tier. The `opencode-go/...-contributor` ids are a
 # paid plan and must never become the default.
 DEFAULT_MODEL = {"codex": "gpt-5.6-sol", "cursor": "composer-2.5",
                  "opencode": "opencode/muse-spark-1.3-contributor-free",
-                 "omp": "opencode-go/deepseek-v4.1-flash"}
+                 "omp": "opencode-go/deepseek-v4.1-flash",
+                 "grok": "grok-4.7"}
 
 
 def ensure_state_dirs():

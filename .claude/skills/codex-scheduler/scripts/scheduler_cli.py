@@ -178,6 +178,8 @@ def validate_job_spec(spec):
         validate_opencode_model(spec)
     if engine == "omp":
         validate_omp_model(spec)
+    if engine == "grok":
+        validate_grok_model(spec)
     effort = spec.get("effort", "medium")
     if effort not in db.VALID_EFFORT:
         err(f"job '{spec['slug']}': effort must be one of {db.VALID_EFFORT}")
@@ -188,7 +190,7 @@ def validate_job_spec(spec):
         err(f"job '{spec['slug']}': max-seconds must be >= 1")
     if spec.get("goal_objective") and engine != "codex":
         err(f"job '{spec['slug']}': --goal/--goal-file needs the codex engine "
-            f"(none of cursor-agent, opencode, or omp has a thread goal)")
+            f"(none of cursor-agent, opencode, omp, or grok has a thread goal)")
     if spec.get("goal_budget") is not None and spec["goal_budget"] < 1:
         err(f"job '{spec['slug']}': --goal-budget must be >= 1")
     if spec.get("goal_max_turns") is not None and spec["goal_max_turns"] < 1:
@@ -285,7 +287,7 @@ def insert_job(conn, session_id, spec):
 def validate_cursor_model(spec):
     """Resolve the cursor model up front and check the CLI actually offers it.
 
-    Reasoning level lives inside the model id, and families differ in which levels exist (Grok 4.6
+    Reasoning level lives inside the model id, and families differ in which levels exist (Grok 4.7
     has no `max`; Composer has no levels at all), so an unsupported --effort/--model pairing would
     otherwise only surface as a failed job minutes later. Echoing the resolved id also makes it
     obvious which model a job really got."""
@@ -379,6 +381,35 @@ def validate_omp_model(spec):
     if spec.get("sandbox") != "danger-full-access":
         print(f"  note: `omp` has NO sandbox flag; --sandbox {spec.get('sandbox')} is recorded "
               f"but not enforced. 'danger-full-access' is the only honest label.", file=sys.stderr)
+
+
+def validate_grok_model(spec):
+    """Check the model id against `grok models` and resolve --effort to grok's own vocabulary.
+
+    Unlike omp, grok is not scoped to one model -- Grok 4.7 is just the default -- so this
+    validates against the CLI's own model list the same way validate_opencode_model does, rather
+    than hardcoding a single accepted id."""
+    sys.path.insert(0, SCRIPT_DIR)
+    import grok_client
+
+    model = (spec.get("model") or db.DEFAULT_MODEL["grok"]).strip()
+    spec["model"] = model
+    spec["resolved_model"] = model
+    effort = grok_client.resolve_effort(spec.get("effort"))
+    if effort is None:
+        err(f"job '{spec['slug']}': grok engine only supports --effort "
+            f"low/medium/high/xhigh/max/ultra (max and ultra reach for xhigh, its ceiling); "
+            f"got --effort {spec.get('effort')!r}")
+    if spec.get("fast_mode"):
+        err(f"job '{spec['slug']}': --fast is a Codex service tier and means nothing to grok")
+    ids = grok_client.available_models()
+    if ids is None:
+        print(f"  note: could not run `grok models`; not validating '{model}'", file=sys.stderr)
+        return
+    if model in ids:
+        return
+    err(f"job '{spec['slug']}': grok model '{model}' is not available.\n"
+        f"  available: {', '.join(sorted(ids)) or '(none)'}")
 
 
 def load_goal_arg(args):
@@ -611,10 +642,10 @@ def resolve_resume(conn, args, spec):
     if not thread_id and not src_slug:
         return
     engine = spec.get("engine") or "codex"
-    if engine not in ("codex", "opencode", "omp"):
+    if engine not in ("codex", "opencode", "omp", "grok"):
         err(f"--resume-from/--resume-thread do not work with the '{engine}' engine "
             f"(cursor-agent has no resumable thread); codex resumes a thread, "
-            f"opencode and omp resume a session")
+            f"opencode, omp and grok resume a session")
     if src_slug:
         src = db.find_job_by_slug(conn, src_slug)
         if not src:
@@ -632,7 +663,7 @@ def resolve_resume(conn, args, spec):
         thread_id = (src.get("thread_id") or "").strip()
         if not thread_id:
             err(f"--resume-from: job '{src_slug}' has no recorded "
-                f"{'session' if engine in ('opencode', 'omp') else 'thread'} id "
+                f"{'session' if engine in ('opencode', 'omp', 'grok') else 'thread'} id "
                 f"(it never reached the engine, so there is nothing to resume)")
     spec["resume_thread_id"] = thread_id
     spec["resume_from_slug"] = src_slug or None
@@ -714,7 +745,7 @@ def cmd_submit(args):
     if spec.get("max_seconds"):
         extras.append(f"budget={spec['max_seconds']}s")
     if spec.get("resume_thread_id"):
-        noun = "session" if (spec.get("engine") in ("opencode", "omp")) else "thread"
+        noun = "session" if (spec.get("engine") in ("opencode", "omp", "grok")) else "thread"
         extras.append(f"resumes {spec.get('resume_from_slug') or noun} "
                       f"({spec['resume_thread_id']})")
     if spec.get("goal_objective"):
@@ -888,7 +919,7 @@ def cmd_show(args):
         conn.close()
     print(json.dumps(job, indent=2))
     engine = job.get("engine") or "codex"
-    noun = "session" if engine in ("opencode", "omp") else "thread"
+    noun = "session" if engine in ("opencode", "omp", "grok") else "thread"
     print(f"\nengine: {engine}  model: {job.get('model')}"
           + (f"  ({engine} has no sandbox; tools run unconfined)"
              if engine in ("opencode", "omp") else ""))
@@ -1631,13 +1662,16 @@ def build_parser():
                     help="which agent CLI runs the job: 'codex' (default), 'cursor' "
                          "(cursor-agent; default model composer-2.5), 'opencode' "
                          "(`opencode run`; default model "
-                         "opencode/muse-spark-1.3-contributor-free, no sandbox) or 'omp' "
-                         "(`omp`; DeepSeek v4.1 Flash at --effort high only, no sandbox)")
+                         "opencode/muse-spark-1.3-contributor-free, no sandbox), 'omp' "
+                         "(`omp`; DeepSeek v4.1 Flash at --effort high only, no sandbox) or "
+                         "'grok' (`grok`/Grok Build; default model grok-4.7, "
+                         "--effort low/medium/high/xhigh, real enforced sandbox)")
     s.add_argument("--model", default=None,
                     help="model id; defaults per engine (codex: gpt-5.6-sol, "
                          "cursor: composer-2.5 with the level from --effort, "
                          "opencode: opencode/muse-spark-1.3-contributor-free, "
-                         "omp: opencode-go/deepseek-v4.1-flash, the only model it supports)")
+                         "omp: opencode-go/deepseek-v4.1-flash, the only model it supports, "
+                         "grok: grok-4.7)")
     s.add_argument("--effort", default="medium", choices=db.VALID_EFFORT)
     s.add_argument("--fast", action="store_true")
     s.add_argument("--sandbox", default="workspace-write", choices=db.VALID_SANDBOX)

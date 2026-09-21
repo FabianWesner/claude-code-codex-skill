@@ -25,6 +25,7 @@ import appserver_client
 import cursor_client
 import opencode_client
 import omp_client
+import grok_client
 
 TICK_SECONDS = 2.0
 _hooks = {"tokens": None, "ask": None, "checkpoint": None, "message": None, "goal": None}
@@ -379,6 +380,7 @@ def launch_ready_jobs(conn, state, on_done, on_tokens=None, on_ask_answer=None,
                 "cursor": cursor_client.CursorSession,
                 "opencode": opencode_client.OpencodeSession,
                 "omp": omp_client.OmpSession,
+                "grok": grok_client.GrokSession,
             }.get(job.get("engine"), appserver_client.JobSession)
             js = driver(
                 job, on_done, on_tokens=on_tokens, on_ask_answer=on_ask_answer,

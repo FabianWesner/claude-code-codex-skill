@@ -127,7 +127,7 @@ All commands: `python3 .claude/skills/codex-scheduler/scripts/scheduler_cli.py <
 
 | command | purpose |
 |---|---|
-| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor\|opencode\|omp] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds] [--resume-from <slug> \| --resume-thread <id>] [--goal "..." \| --goal-file f] [--goal-budget N] [--goal-max-turns N] [--worktree] [--no-symlinks]` | queue one job |
+| `submit --session --slug --workspace (--prompt \| --prompt-file) [--engine codex\|cursor\|opencode\|omp\|grok] [--deps a,b] [--effort] [--model] [--fast] [--sandbox] [--priority] [--schema] [--cite] [--max-seconds] [--resume-from <slug> \| --resume-thread <id>] [--goal "..." \| --goal-file f] [--goal-budget N] [--goal-max-turns N] [--worktree] [--no-symlinks]` | queue one job |
 | `submit-batch --session --file jobs.json` | queue a DAG of jobs in one call |
 | `list [--session] [--status] [--json]` | full summary of all jobs |
 | `show <slug>` | one job's full detail + last 40 lines of its live log |
@@ -185,10 +185,10 @@ thread carries irrelevant context and costs tokens on every turn.
 - **Context window limits still apply.** A resumed thread keeps growing and compacts itself when
   it fills, so a very long chain gradually loses its earliest detail. For a long epic, prefer a
   few resumed chunks over dozens.
-- Codex, OpenCode and OMP only — `--engine cursor` jobs have no resumable thread. An OpenCode or
-  OMP job resumes its **session** (`opencode run --session <id>` / `omp -r <id>`) with the same
-  flags and the same lineage display; a thread/session can only be continued on the engine that
-  created it.
+- Codex, OpenCode, OMP and Grok only — `--engine cursor` jobs have no resumable thread. An
+  OpenCode, OMP or Grok job resumes its **session** (`opencode run --session <id>` / `omp -r <id>`
+  / `grok -r <id>`) with the same flags and the same lineage display; a thread/session can only be
+  continued on the engine that created it.
 - In a `submit-batch` file the same thing is `"resume_from": "<slug>"` (or
   `"resume_thread": "<id>"`) on a job spec. The source must already be terminal at submit time, so
   it cannot be another job in the same batch.
@@ -217,7 +217,7 @@ python3 $CLI submit --session <sid> --slug e12-epic --workspace /path/to/repo \
 - `--goal-budget <tokens>` is the thread's token budget. Running out settles the job rather than
   letting it grind on.
 - `--goal-max-turns N` (default 12) caps how many turns the scheduler will let the goal run for.
-- Codex engine only. `--engine cursor`, `--engine opencode` and `--engine omp` have no thread goal and the submit is refused.
+- Codex engine only. `--engine cursor`, `--engine opencode`, `--engine omp` and `--engine grok` have no thread goal and the submit is refused.
 
 **What the status column means.** `list` shows `goal:<status>/<n>t` — the goal's status and the
 number of turns taken. The status vocabulary is the protocol's own
@@ -424,9 +424,9 @@ available reset credits, and lifetime/daily token usage. It queries Codex direct
 daemon, so it is safe to run at any time -- including before deciding whether to fan out a batch of
 expensive jobs.
 
-## Choosing the engine: Codex, Cursor, OpenCode or OMP
+## Choosing the engine: Codex, Cursor, OpenCode, OMP or Grok
 
-Every job runs under one of four agent CLIs, selected with `--engine` (default `codex`). All are
+Every job runs under one of five agent CLIs, selected with `--engine` (default `codex`). All are
 driven through the same scheduler: dependencies, `--drain`, budgets, checkpoints, markers,
 structured output and token accounting all work identically, and a batch can mix them freely --
 including passing a Codex job's result into a Cursor job with `{{deps.<slug>.result}}`.
@@ -435,8 +435,8 @@ including passing a Codex job's result into a Cursor job with `{{deps.<slug>.res
 # Cursor with Composer (no reasoning levels -- one tier)
 ... submit --engine cursor --model composer-2.5 --slug build --workspace <repo> --prompt "..."
 
-# Cursor with Grok 4.6, non-fast, choosing the reasoning level
-... submit --engine cursor --model cursor-grok-4.6 --effort xhigh --slug review ...
+# Cursor with Grok 4.7, non-fast, choosing the reasoning level
+... submit --engine cursor --model grok-4.7 --effort xhigh --slug review ...
 
 # Cursor with Gemini 3.8 Flash, choosing the reasoning level (low/medium/high; no xhigh/max tier)
 ... submit --engine cursor --model gemini-3.8-flash --effort high --slug review ...
@@ -445,15 +445,15 @@ including passing a Codex job's result into a Cursor job with `{{deps.<slug>.res
 **Model and reasoning level.** Cursor bakes the reasoning level into the model id, so `--effort`
 selects the suffix rather than a separate parameter:
 
-| `--effort` | `cursor-grok-4.6` | `composer-2.5` |
+| `--effort` | `grok-4.7` | `composer-2.5` |
 |---|---|---|
 | `low` / `medium` / `high` / `xhigh` | `-low` / `-medium` / `-high` / `-xhigh` | `composer-2.5` (no levels) |
 | `max` / `ultra` | `-xhigh` (no higher tier exists) | `composer-2.5` |
 
-Families differ -- Grok 4.6 stops at `xhigh`, Gemini 3.8 Flash stops at `high`, Luna and Sol also offer `max` -- so resolution
+Families differ -- Grok 4.7 stops at `xhigh`, Gemini 3.8 Flash stops at `high`, Luna and Sol also offer `max` -- so resolution
 is checked against `cursor-agent --list-models` rather than assumed, and **submit fails
 immediately** with the available ids if a pairing does not exist. The resolved id is echoed on
-submit (`model=cursor-grok-4.6-xhigh`) so there is never doubt about what a job actually ran.
+submit (`model=grok-4.7-xhigh`) so there is never doubt about what a job actually ran.
 Jobs are **non-fast** unless you pass `--fast`. `--effort max` and `ultra` are equivalent for
 Cursor (there is no tier above `max`, so both just reach for the ceiling a family actually has).
 
@@ -545,6 +545,43 @@ has been wired up or validated for this engine.
   reported from the `turn_end` event's usage (input/cached/output/reasoning; no context-window
   figure, so that field stays null). A nonzero exit or a non-JSON stdout line fails the job with
   that text as the error.
+
+### Grok engine
+
+`--engine grok` drives `grok -p "<prompt>" --output-format streaming-json --model grok-4.7
+--reasoning-effort <level> --sandbox <profile> --always-approve --cwd <workspace>` — a one-shot
+subprocess streaming newline-delimited JSON events, like Cursor, OpenCode and OMP.
+
+```bash
+... submit --engine grok --slug spike --workspace <repo> \
+    --effort xhigh --sandbox workspace-write --prompt-file brief.md
+# follow-up in the SAME Grok session
+... submit --engine grok --slug spike-2 --workspace <repo> \
+    --resume-from spike --prompt "..."
+```
+
+- **Model:** defaults to `grok-4.7` (500k context window, the model default). `--model` is validated against `grok models` at submit time,
+  so a typo fails immediately with the ids that do exist. `--fast` is rejected as the Codex-only
+  service tier it is.
+- **Effort, unlike OMP, is not scoped to one value.** `--effort` maps onto the CLI's own
+  `--reasoning-effort low/medium/high/xhigh`; `max`/`ultra` reach for `xhigh`, its ceiling (there
+  is no tier above it), the same way Cursor's Grok 4.7 does.
+- **Real, enforced sandbox — unlike OpenCode and OMP.** `read-only` → grok's built-in `read-only`
+  profile, `workspace-write` → `workspace`, `danger-full-access` → `none` (no sandbox at all).
+  These are genuine filesystem/network restrictions, not a recorded-but-ignored note.
+- **Resumable, but the session id is known only once the run finishes.** Unlike OpenCode/OMP,
+  which announce a session id up front, grok's streaming output only carries `sessionId` on the
+  final `end` event, so `show`/the dashboard won't have a thread/session id for a still-running
+  Grok job. `--resume-from` still works once the source job is terminal.
+- **No mid-turn control**, same as Cursor/OpenCode/OMP: `steer` and `ask` are rejected with a
+  clear message, `stop` terminates the process.
+- **No goal mode** (`--goal`/`--goal-file` is refused; only Codex has a thread goal).
+- **Markers work identically:** `[[NOTE]]`/`[[CHECKPOINT]]` lines are dispatched and stripped, the
+  final assistant message becomes the result, tool calls are logged one line each, and tokens are
+  reported from the `end` event's usage (input/cached/output/reasoning; no context-window figure,
+  so that field stays null). A nonzero exit or an `error` event fails the job with the message
+  grok gave; a pre-flight failure (e.g. an unresolvable sandbox profile) prints plain text instead
+  of a JSON event and is kept as the error the same way.
 
 ## Job parameters
 
