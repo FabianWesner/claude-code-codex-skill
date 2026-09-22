@@ -591,13 +591,17 @@ subprocess streaming newline-delimited JSON events, like Cursor, OpenCode and OM
   calls at every level, 2026-09-04). Scale to the job like the base skill's recipes: `low` for
   quick lookups, `high`/`xhigh` for real analysis, `max`/`ultra` for the hardest code tasks —
   `ultra` additionally triggers Codex's own automatic task delegation.
-- **model**: defaults to `gpt-5.6-sol`. For the hardest jobs, `--model gpt-6-astra` (a full
-  generation up, not a 5.6-family sibling — "our most capable model for complex, demanding work"
-  per Codex's own listing) is worth the extra cost/latency; pair it with `--effort
-  high`/`xhigh`/`max`/`ultra`. Verified working end to end 2026-09-04. At the other end, Codex
-  also exposes cheaper/faster 5.6-family siblings for lower-stakes jobs — e.g. `gpt-5.6-luna`
-  (verified working via `codex exec -m gpt-5.6-luna`) — pass `--model gpt-5.6-luna` when you don't
-  need the default tier.
+- **model**: defaults to `gpt-5.6-sol`. GPT-6 is now out as a full sibling generation to 5.6, not
+  a replacement — `gpt-6-astra` (most capable, `ultra` up to automatic task delegation),
+  `gpt-6-sol` and `gpt-6-luna` (verified reachable 2026-09-22: both accept the model id and run —
+  confirmed by hitting a usage-limit error rather than an unknown-model one; a live low-effort
+  reply wasn't obtained because the account was over quota at verification time). `gpt-6-sol`
+  supports `low`/`medium`/`high`/`xhigh`/`max`/`ultra` same as `gpt-6-astra`; `gpt-6-luna` stops at
+  `max` (no `ultra`), same shape as `gpt-5.6-luna`. Pick the 6-family sibling over its 5.6
+  counterpart by default now that it's out — `gpt-6-sol` in place of `gpt-5.6-sol` for everyday
+  jobs, `gpt-6-luna` in place of `gpt-5.6-luna` for cheap/low-stakes ones — and reach for
+  `gpt-6-astra` for the hardest jobs, pairing it with `--effort high`/`xhigh`/`max`/`ultra`. The
+  5.6-family ids (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) still work if you need them.
 - **fast_mode** (`--fast`, default off): sets Codex's `service_tier=fast` +
   `features.fast_mode=true` for that job's app-server process — ~1.5x speed at a higher credit
   rate (2.5x standard on GPT-5.6/5.5, 2x on GPT-5.4). It's a speed/cost tradeoff, independent of
