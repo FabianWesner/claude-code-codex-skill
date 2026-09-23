@@ -569,7 +569,7 @@ def _run_summary(job_id, workspace, log_text):
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, f"{job_id}.txt")
             subprocess.run(
-                ["codex", "exec", "-C", workspace, "-m", "gpt-5.6-luna",
+                ["codex", "exec", "-C", workspace, "-m", "gpt-6-luna",
                  "-c", "model_reasoning_effort=low", "-s", "read-only", "-o", out_path, prompt],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=45,

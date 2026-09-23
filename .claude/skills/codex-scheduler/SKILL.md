@@ -645,7 +645,7 @@ tells you plainly that the user did it, not that it failed.
 
 The table's "Working On" column (running jobs only) is a one-line, plain-language summary of what
 a job is doing right now — e.g. "Currently testing the Android mobile app" — regenerated about
-once a minute per running job by a separate, cheap `codex exec -m gpt-5.6-luna -c
+once a minute per running job by a separate, cheap `codex exec -m gpt-6-luna -c
 model_reasoning_effort=low` call fed the job's own recent (filtered) output. It's a nice-to-have,
 not something to depend on for anything besides a glance at the table.
 
